@@ -1,11 +1,11 @@
-# AnyGraphAnyExpert
+# Graph Model Merging
 
 ## Environment set up
 
 ```bash
 # create a new environment
 conda create -n mergng-graph -y python=3.10
-conda activate agae
+conda activate mergng-graph
 
 # install pytorch
 pip install torch==2.1.1 --index-url https://download.pytorch.org/whl/cu118
