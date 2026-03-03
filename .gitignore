@@ -1,0 +1,31 @@
+# ignore Python cache files
+*__pycache__
+# ignore VSCode settings and workspace files
+.vscode/
+
+# ignore heavy data files but keep .gitkeep files for directory structure
+data/splits/*
+!data/splits/.gitkeep
+data/datasets/*
+!data/datasets/.gitkeep
+data/feature_svd/*
+!data/feature_svd/.gitkeep
+data/induced_subgraphs/*
+!data/induced_subgraphs/.gitkeep
+data/subgraph_svd/*
+!data/subgraph_svd/.gitkeep
+
+trained_models/*
+!trained_models/.gitkeep
+
+pretrained_models/*
+!pretrained_models/.gitkeep
+
+finetuned_models/*
+!finetuned_models/.gitkeep
+
+slurm/output/*
+!slurm/output/.gitkeep
+
+huggingface/*
+!huggingface/operation.sh
