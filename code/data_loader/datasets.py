@@ -2,6 +2,7 @@ from numbers import Integral
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple, List
 import contextlib
+import re
 import warnings
 
 import torch
@@ -350,6 +351,34 @@ def _split_dataset_dir(split_root_path: Path, dataset_name: str) -> Path:
     return _dataset_scoped_dir(split_root_path, _base_dataset_for_split_name(dataset_name))
 
 
+def _canonical_split_dataset_name(dataset_name: str, task_level: str, seed: int) -> str:
+    """
+    Canonical split file stem:
+      - node/graph: <base>_<task>_seed<seed>
+      - edge:       <base>_edge_seed<seed>
+    """
+    name = str(dataset_name).strip()
+    if not name:
+        return name
+
+    task = str(task_level or "").lower()
+    if task not in {"node", "graph", "edge"}:
+        return name
+
+    # Already has a task-qualified seed marker.
+    tagged = re.match(r"^(?P<base>.+)_(?P<tag>node|graph|edge)_seed(?P<seed>\d+)$", name)
+    if tagged:
+        return name
+
+    # Bare edge name without a seed marker.
+    if task == "edge" and name.endswith("_edge"):
+        return f"{name}_seed{int(seed)}"
+
+    if task == "edge":
+        return f"{name}_edge_seed{int(seed)}"
+    return f"{name}_{task}_seed{int(seed)}"
+
+
 def _split_suffix(portions: Tuple[float, float, float]) -> str:
     # Represent split as integer percentages for filenames, e.g., (0.8,0.1,0.1) -> "80-10-10"
     return "-".join(str(int(round(float(p) * 100))) for p in portions)
@@ -656,38 +685,6 @@ def _edge_split_file_path(
     return dataset_split_dir / f"{edge_name}_splits-{_split_suffix(split)}.pt"
 
 
-def _legacy_edge_split_file_path(
-    dataset_name: str,
-    split: Tuple[float, float, float],
-    split_root_path: Path,
-) -> Path:
-    edge_name = str(dataset_name)
-    if "_edge_" not in edge_name and not edge_name.endswith("_edge"):
-        edge_name = f"{edge_name}_edge"
-    pos_suffix = _split_suffix(split)
-    neg_pct = int(round(float(split[0]) * 100))
-    dataset_split_dir = _split_dataset_dir(split_root_path, edge_name)
-    return dataset_split_dir / f"{edge_name}_splits-pos{pos_suffix}-neg{neg_pct}.pt"
-
-
-def _alternate_edge_split_dataset_name(dataset_name: str) -> Optional[str]:
-    name = str(dataset_name)
-    marker_new = "_edge_seed"
-    if marker_new in name:
-        base, seed = name.rsplit(marker_new, 1)
-        if seed.isdigit():
-            return f"{base}_seed{seed}_edge"
-
-    marker_old = "_seed"
-    if name.endswith("_edge"):
-        core = name[: -len("_edge")]
-        if marker_old in core:
-            base, seed = core.rsplit(marker_old, 1)
-            if seed.isdigit():
-                return f"{base}_edge_seed{seed}"
-    return None
-
-
 def _edge_positive_counts(
     total_edges: int,
     split: Tuple[float, float, float],
@@ -763,12 +760,6 @@ def _load_existing_edge_split_payload(path: Path, expected_total_edges: int):
     meta = payload.get("meta", {})
     parsed["meta"] = meta
 
-    # Invalidate legacy edge split files where val/test negatives were not matched
-    # to their positive counts (new policy). New files carry an explicit mode flag.
-    mode = str(meta.get("negative_sampling_mode", "")).strip().lower()
-    if mode in ("match_split_positive", "match_split_positive_best_effort"):
-        return parsed
-
     train_pos = len(parsed["train_pos_idx"])
     val_pos = len(parsed["val_pos_idx"])
     test_pos = len(parsed["test_pos_idx"])
@@ -789,7 +780,16 @@ def _sample_negative_edge_pairs(
 ) -> torch.Tensor:
     if num_nodes <= 0 or num_neg_samples <= 0:
         return torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
-    with torch.random.fork_rng():
+
+    # Avoid initializing all visible CUDA devices inside fork_rng.
+    fork_devices: List[int] = []
+    if edge_index.is_cuda:
+        device_index = edge_index.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        fork_devices = [int(device_index)]
+
+    with torch.random.fork_rng(devices=fork_devices):
         torch.manual_seed(int(seed))
         neg_pairs = negative_sampling(
             edge_index=edge_index,
@@ -816,53 +816,10 @@ def _get_or_create_edge_split_payload(
         raise ValueError("split_root_path must be provided for edge split generation.")
     _validate_edge_split_def(split)
     split_path = _edge_split_file_path(dataset_name, split, split_root_path)
-    legacy_split_path = _legacy_edge_split_file_path(dataset_name, split, split_root_path)
-    alt_name = _alternate_edge_split_dataset_name(dataset_name)
-
-    cleanup_candidates = [legacy_split_path]
-    if alt_name:
-        cleanup_candidates.extend(
-            [
-                _edge_split_file_path(alt_name, split, split_root_path),
-                _legacy_edge_split_file_path(alt_name, split, split_root_path),
-            ]
-        )
 
     total_edges = int(data.edge_index.size(1))
     existing = _load_existing_edge_split_payload(split_path, total_edges)
-    if existing is None:
-        candidate_paths = []
-        if legacy_split_path != split_path:
-            candidate_paths.append(legacy_split_path)
-        if alt_name:
-            alt_primary = _edge_split_file_path(alt_name, split, split_root_path)
-            alt_legacy = _legacy_edge_split_file_path(alt_name, split, split_root_path)
-            if alt_primary != split_path:
-                candidate_paths.append(alt_primary)
-            if alt_legacy != split_path:
-                candidate_paths.append(alt_legacy)
-        for candidate in candidate_paths:
-            existing = _load_existing_edge_split_payload(candidate, total_edges)
-            if existing is None:
-                continue
-            if persist and not split_path.exists():
-                ensure_dir(str(split_root_path))
-                torch.save(existing, split_path)
-                if verbose:
-                    print(f"[Dataset split] Migrated legacy edge split to {split_path}")
-            if verbose:
-                print(f"[Dataset split] Loaded fixed edge split from {candidate}")
-            return existing
     if existing is not None:
-        if persist:
-            for candidate in cleanup_candidates:
-                if candidate == split_path:
-                    continue
-                try:
-                    if candidate.exists():
-                        candidate.unlink()
-                except OSError:
-                    pass
         if verbose:
             print(f"[Dataset split] Loaded fixed edge split from {split_path}")
         return existing
@@ -1439,7 +1396,7 @@ def create_dataset(
                         "split": tuple(float(v) for v in split_def),
                         "seed": int(seed),
                     }
-                    split_name = f"{base_name}_edge_seed{int(seed)}"
+                    split_name = _canonical_split_dataset_name(base_name, "edge", int(seed))
                     split_payload = _get_or_create_edge_split_payload(
                         dataset_name=split_name,
                         split=split_def,
@@ -1561,10 +1518,11 @@ def create_dataset(
                         if split is not None:
                             split_def = split
                             _validate_split_def(split_def)
+                            split_name = _canonical_split_dataset_name(base_name, "node", int(seed))
                             use_few_shot = _is_few_shot_split_def(split_def)
                             if use_few_shot:
                                 train_idx, val_idx, test_idx = _get_or_create_few_shot_split(
-                                    dataset_name=base_name,
+                                    dataset_name=split_name,
                                     labels=labels,
                                     shots_per_class=int(split_def[0]),
                                     val_ratio=float(split_def[1]),
@@ -1574,7 +1532,7 @@ def create_dataset(
                                 )
                             elif labeled_idx is not None and len(labeled_idx) < base_data.num_nodes:
                                 train_idx, val_idx, test_idx = _get_or_create_split_indices_subset(
-                                    dataset_name=base_name,
+                                    dataset_name=split_name,
                                     split=split_def,
                                     seed=seed,
                                     split_root_path=split_root_path,
@@ -1582,7 +1540,7 @@ def create_dataset(
                                 )
                             else:
                                 train_idx, val_idx, test_idx = _get_or_create_split_indices(
-                                    dataset_name=base_name,
+                                    dataset_name=split_name,
                                     split=split_def,
                                     seed=seed,
                                     split_root_path=split_root_path,
@@ -1722,28 +1680,6 @@ def _feature_svd_path(dataset_root: str, name: str, dim: int, task_level: str | 
     return dataset_dir / f"feature_svd_{name}{suffix}_d{dim}.pt"
 
 
-def _legacy_feature_svd_path(dataset_root: str, name: str, dim: int, task_level: str | None = None) -> Path:
-    suffix = _feature_task_suffix(task_level)
-    dataset_dir = _dataset_scoped_dir(dataset_root, name)
-    return dataset_dir / f"svd_cache_{name}{suffix}_d{dim}.pt"
-
-
-def _feature_svd_compat_paths(dataset_root: str, name: str, dim: int, task_level: str | None = None) -> List[Path]:
-    dataset_dir = _dataset_scoped_dir(dataset_root, name)
-    new_primary = _feature_svd_path(dataset_root, name, dim, task_level=task_level)
-    new_legacy = _legacy_feature_svd_path(dataset_root, name, dim, task_level=task_level)
-    # Backward compatibility for old node/graph naming without task suffix.
-    old_primary = dataset_dir / f"feature_svd_{name}_d{dim}.pt"
-    old_legacy = dataset_dir / f"svd_cache_{name}_d{dim}.pt"
-
-    paths = [new_primary, new_legacy]
-    if old_primary not in paths:
-        paths.append(old_primary)
-    if old_legacy not in paths:
-        paths.append(old_legacy)
-    return paths
-
-
 def _apply_feature_svd(
     dataset,
     name: str,
@@ -1755,29 +1691,20 @@ def _apply_feature_svd(
     """Apply SVD once and persist reduced features to avoid recompute."""
     root = output_root or dataset.root
     save_path = _feature_svd_path(root, name, dim, task_level=task_level)
-    cache_candidates = _feature_svd_compat_paths(root, name, dim, task_level=task_level)
 
     dataset_data = _get_dataset_data_storage(dataset)
     target_x = getattr(dataset_data, "x", None) if dataset_data is not None else None
     target_device = target_x.device if target_x is not None else "cpu"
-    for cache_path in cache_candidates:
-        if cache_path.exists():
-            try:
-                payload = torch.load(cache_path, map_location=target_device)
-                dataset_data = _get_dataset_data_storage(dataset)
-                if dataset_data is None:
-                    raise ValueError("Dataset has no in-memory data storage.")
-                dataset_data.x = payload["x"].to(target_device)
-                # Migrate old filenames to the canonical new path.
-                if cache_path != save_path:
-                    try:
-                        save_path.parent.mkdir(parents=True, exist_ok=True)
-                        torch.save({"x": dataset_data.x.detach().cpu()}, save_path)
-                    except Exception:
-                        pass
-                return
-            except Exception:
-                cache_path.unlink(missing_ok=True)
+    if save_path.exists():
+        try:
+            payload = torch.load(save_path, map_location=target_device)
+            dataset_data = _get_dataset_data_storage(dataset)
+            if dataset_data is None:
+                raise ValueError("Dataset has no in-memory data storage.")
+            dataset_data.x = payload["x"].to(target_device)
+            return
+        except Exception:
+            save_path.unlink(missing_ok=True)
 
     print(f"[FeatureSVD] Processing features for {name} (task={task_level or 'node'})...")
 
@@ -1820,6 +1747,7 @@ def split_graph_dataset(
         raise ValueError("split_root is required to save or load fixed splits.")
 
     split_root_path = Path(split_root)
+    split_dataset_name = _canonical_split_dataset_name(dataset_name, "graph", int(seed))
 
     _validate_split_def(split)
 
@@ -1843,7 +1771,7 @@ def split_graph_dataset(
             labels_list.append(int(target[0].item()))
         labels = torch.tensor(labels_list, dtype=torch.long)
         train_idx, val_idx, test_idx = _get_or_create_few_shot_split(
-            dataset_name=dataset_name,
+            dataset_name=split_dataset_name,
             labels=labels,
             shots_per_class=int(split[0]),
             val_ratio=float(split[1]),
@@ -1853,7 +1781,7 @@ def split_graph_dataset(
         )
     else:
         train_idx, val_idx, test_idx = _get_or_create_split_indices(
-            dataset_name=dataset_name,
+            dataset_name=split_dataset_name,
             split=split,
             seed=seed,
             split_root_path=split_root_path,
@@ -1882,8 +1810,7 @@ def _get_or_create_few_shot_split(
 
     dataset_split_dir = _split_dataset_dir(split_root_path, dataset_name)
     split_tag = _few_shot_suffix(shots_per_class, val_ratio, test_ratio)
-    # Include seed so multi-run few-shot experiments resample support sets.
-    split_path = dataset_split_dir / f"{dataset_name}_splits-{split_tag}-seed{int(seed)}.pt"
+    split_path = dataset_split_dir / f"{dataset_name}_splits-{split_tag}.pt"
     
     labels = labels.view(-1).cpu()
     total = labels.numel()
@@ -1960,6 +1887,8 @@ def make_loaders(
     drop_last_train: bool = False,
 ):
     """Create data loaders for training, validation, and testing."""
+    raw_dataset_name = str(dataset_name)
+    split_dataset_name = _canonical_split_dataset_name(raw_dataset_name, task_level, int(seed))
     if split is not None:
         if task_level == "edge":
             _validate_edge_split_def(split)
@@ -2003,7 +1932,7 @@ def make_loaders(
                 collected.append(int(target[0].item()))
             labels = torch.tensor(collected, dtype=torch.long)
         return _get_or_create_few_shot_split(
-            dataset_name=dataset_name,
+            dataset_name=split_dataset_name,
             labels=labels,
             shots_per_class=shots_per_class,
             val_ratio=val_ratio,
@@ -2017,7 +1946,7 @@ def make_loaders(
         raise ValueError("Few-shot split is not supported for regression tasks.")
 
     # LRGB PascalVOC-SP / COCO-SP are multi-graph node tasks with built-in train/val/test splits.
-    if task_level == "node" and not induced and isinstance(dataset, LRGBDataset) and dataset_name.lower() in LRGB_NODE_NAMES:
+    if task_level == "node" and not induced and isinstance(dataset, LRGBDataset) and raw_dataset_name.lower() in LRGB_NODE_NAMES:
         loader_kwargs = dict(
             batch_size=batch_size,
             num_workers=num_workers,
@@ -2038,7 +1967,7 @@ def make_loaders(
                 try:
                     _apply_feature_svd(
                         ds,
-                        dataset_name,
+                        raw_dataset_name,
                         svd_dim,
                         reducer,
                         task_level="node",
@@ -2066,7 +1995,7 @@ def make_loaders(
             if len(split) < 3:
                 raise ValueError("Few-shot split must provide [shots_per_class, val_ratio, test_ratio].")
             train_idx, val_idx, test_idx = _get_or_create_few_shot_split(
-                dataset_name=dataset_name,
+                dataset_name=split_dataset_name,
                 labels=data.y,
                 shots_per_class=int(split[0]),
                 val_ratio=float(split[1]),
@@ -2077,7 +2006,7 @@ def make_loaders(
         else:
             if labeled_idx is not None and len(labeled_idx) < data.num_nodes:
                 train_idx, val_idx, test_idx = _get_or_create_split_indices_subset(
-                    dataset_name=dataset_name,
+                    dataset_name=split_dataset_name,
                     split=split,
                     seed=seed,
                     split_root_path=split_root_path,
@@ -2085,7 +2014,7 @@ def make_loaders(
                 )
             else:
                 train_idx, val_idx, test_idx = _get_or_create_split_indices(
-                    dataset_name=dataset_name,
+                    dataset_name=split_dataset_name,
                     split=split,
                     seed=seed,
                     split_root_path=split_root_path,
@@ -2113,13 +2042,8 @@ def make_loaders(
         split_root_path = Path(split_root)
         if use_few_shot:
             raise ValueError("Few-shot split is not supported for edge-level tasks.")
-        edge_split_name = (
-            dataset_name
-            if ("_edge_" in str(dataset_name) or str(dataset_name).endswith("_edge"))
-            else dataset_name + "_edge"
-        )
         split_payload = _get_or_create_edge_split_payload(
-            dataset_name=edge_split_name,
+            dataset_name=split_dataset_name,
             split=split,
             seed=seed,
             split_root_path=split_root_path,
@@ -2218,7 +2142,7 @@ def make_loaders(
         if not val_idx or not test_idx:
             train_set, val_set, test_set = split_graph_dataset(
                 dataset=dataset,
-                dataset_name=dataset_name,
+                dataset_name=split_dataset_name,
                 split=split,
                 seed=seed,
                 split_root=split_root,
@@ -2235,7 +2159,7 @@ def make_loaders(
     else:
         train_set, val_set, test_set = split_graph_dataset(
             dataset=dataset, 
-            dataset_name=dataset_name,
+            dataset_name=split_dataset_name,
             split=split, 
             seed=seed,
             split_root=split_root,

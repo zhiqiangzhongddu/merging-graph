@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from code.config import cfg as base_cfg, update_cfg
-from code.data_loader.dataset_prepare import prepare_datasets
+from code.data_loader.dataset_prepare import prepare_datasets, read_datasets
+from code.data_loader.datasets import infer_task_level
+from code.data_loader.summary import run_data_summary
 from code.utils import set_seed
 
 TargetSelection = Optional[Union[str, List[str]]]
@@ -279,6 +281,61 @@ def _run_prepare_stage(
     )
 
 
+def _read_stage_dataset_names(stage: _PrepStage) -> List[str]:
+    if isinstance(stage.datasets, list):
+        return [str(name).strip() for name in stage.datasets if str(name).strip()]
+    return [name.strip() for name in read_datasets(str(stage.datasets)) if name.strip()]
+
+
+def _dedupe_names(names: Iterable[str]) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for raw_name in names:
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        deduped.append(name)
+        seen.add(key)
+    return deduped
+
+
+def _collect_summary_dataset_names(stages: List[_PrepStage]) -> Tuple[List[str], List[str]]:
+    node_names: List[str] = []
+    graph_names: List[str] = []
+
+    for stage in stages:
+        try:
+            dataset_names = _read_stage_dataset_names(stage)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[DataPrep][Summary] Skip stage '{stage.title}': failed to resolve datasets ({exc})")
+            continue
+        if not dataset_names:
+            continue
+
+        has_node_or_edge = "node" in stage.task_levels or "edge" in stage.task_levels
+        has_graph = "graph" in stage.task_levels
+
+        if has_node_or_edge and not has_graph and not stage.use_infer:
+            node_names.extend(dataset_names)
+            continue
+        if has_graph and not has_node_or_edge and not stage.use_infer:
+            graph_names.extend(dataset_names)
+            continue
+
+        for name in dataset_names:
+            inferred = infer_task_level(name)
+            if inferred == "graph":
+                graph_names.append(name)
+            else:
+                # Edge datasets share node-level storage/loading conventions here.
+                node_names.append(name)
+
+    return _dedupe_names(node_names), _dedupe_names(graph_names)
+
+
 def run_data_preparation(cfg) -> int:
     """Main orchestrator used by `run_data_preparation.py`."""
     dp_cfg = cfg.data_preparation
@@ -305,7 +362,21 @@ def run_data_preparation(cfg) -> int:
         _run_prepare_stage(cfg, stage, split_defs_by_task=split_defs_by_task, split_seeds=split_seeds)
         for stage in stages
     ]
-    return 0 if all(code == 0 for code in status_codes) else 1
+
+    node_summary_names, graph_summary_names = _collect_summary_dataset_names(stages)
+    summary_status = 0
+    if node_summary_names or graph_summary_names:
+        _print_stage_header("[DataPrep] Dataset summary", char="=")
+        summary_status = run_data_summary(
+            cfg,
+            node_names=node_summary_names,
+            graph_names=graph_summary_names,
+        )
+    else:
+        print("[DataPrep][Summary] No datasets selected for summary generation.")
+
+    prep_status = 0 if all(code == 0 for code in status_codes) else 1
+    return 0 if prep_status == 0 and summary_status == 0 else 1
 
 
 def run_data_preparation_from_cli(argv: Iterable[str]) -> int:

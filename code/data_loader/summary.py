@@ -1,20 +1,17 @@
-"""Dataset summary generation for all configured available datasets."""
+"""Dataset summary generation for configured or explicitly selected datasets."""
 
 from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import torch
 
 from code.config import cfg as base_cfg, update_cfg
 from code.data_loader.dataset_prepare import read_datasets
 from code.data_loader.datasets import create_dataset, is_regression_dataset
-
-
-DEFAULT_OUTPUT_PATH = Path("data/data_summary.tsv")
 
 
 @dataclass(frozen=True)
@@ -238,7 +235,76 @@ def _summarize_graph_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
     )
 
 
-def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> None:
+def _summary_row_key(row: DatasetSummaryRow) -> Tuple[str, str]:
+    return row.name.casefold(), row.dataset_type.casefold()
+
+
+def _row_from_record(record: dict) -> Optional[DatasetSummaryRow]:
+    try:
+        name = str(record.get("name", "")).strip()
+        dataset_type = str(record.get("type", "")).strip().lower()
+        if not name or dataset_type not in {"node", "graph"}:
+            return None
+        return DatasetSummaryRow(
+            name=name,
+            dataset_type=dataset_type,
+            num_graphs=int(record.get("#graphs", 0)),
+            num_nodes=int(record.get("#nodes", 0)),
+            avg_nodes=float(record.get("#avg. nodes", 0.0)),
+            num_edges=int(record.get("#edges", 0)),
+            avg_edges=float(record.get("#avg. edges", 0.0)),
+            num_features=int(record.get("#features", -1)),
+            task=str(record.get("task", "")).strip(),
+            num_labels=int(record.get("#labels", -1)),
+        )
+    except Exception:
+        return None
+
+
+def _load_existing_summary_rows(output_path: Path) -> List[DatasetSummaryRow]:
+    if not output_path.is_file():
+        return []
+
+    rows: List[DatasetSummaryRow] = []
+    try:
+        with output_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            for record in reader:
+                row = _row_from_record(record)
+                if row is not None:
+                    rows.append(row)
+    except Exception:
+        return []
+    return rows
+
+
+def _merge_summary_rows(
+    existing_rows: Sequence[DatasetSummaryRow],
+    new_rows: Sequence[DatasetSummaryRow],
+) -> List[DatasetSummaryRow]:
+    merged_by_key = {}
+    ordered_keys: List[Tuple[str, str]] = []
+
+    for row in existing_rows:
+        key = _summary_row_key(row)
+        if key not in merged_by_key:
+            ordered_keys.append(key)
+        merged_by_key[key] = row
+
+    for row in new_rows:
+        key = _summary_row_key(row)
+        if key not in merged_by_key:
+            ordered_keys.append(key)
+        merged_by_key[key] = row
+
+    return [merged_by_key[key] for key in ordered_keys]
+
+
+def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> int:
+    merged_rows = _merge_summary_rows(
+        existing_rows=_load_existing_summary_rows(output_path),
+        new_rows=rows,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, delimiter="\t")
@@ -256,7 +322,7 @@ def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> None:
                 "#labels",
             ]
         )
-        for row in rows:
+        for row in merged_rows:
             writer.writerow(
                 [
                     row.name,
@@ -271,6 +337,7 @@ def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> None:
                     row.num_labels,
                 ]
             )
+    return len(merged_rows)
 
 
 def _print_summary_status(name: str, dataset_type: str) -> None:
@@ -282,15 +349,39 @@ def _sorted_dataset_names(names: Sequence[str]) -> List[str]:
     return sorted(names, key=lambda item: item.casefold())
 
 
-def run_data_summary(cfg) -> int:
-    ds_cfg = cfg.data_preparation.dataset
+def _normalize_dataset_names(names: Sequence[str]) -> List[str]:
+    unique_by_key = {}
+    for raw_name in names:
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key not in unique_by_key:
+            unique_by_key[key] = name
+    return _sorted_dataset_names(list(unique_by_key.values()))
+
+
+def _read_names_from_cfg_list(path_value: str) -> List[str]:
+    list_path = _resolve_list_path(path_value)
+    return read_datasets(str(list_path))
+
+
+def run_data_summary(
+    cfg,
+    node_names: Optional[Sequence[str]] = None,
+    graph_names: Optional[Sequence[str]] = None,
+) -> int:
+    prep_cfg = cfg.data_preparation
+    ds_cfg = prep_cfg.dataset
     dataset_root = str(getattr(ds_cfg, "root", "data/datasets"))
 
-    node_list_path = _resolve_list_path(str(getattr(ds_cfg, "available_node_datasets", "")))
-    graph_list_path = _resolve_list_path(str(getattr(ds_cfg, "available_graph_datasets", "")))
+    if node_names is None:
+        node_names = _read_names_from_cfg_list(str(getattr(ds_cfg, "available_node_datasets", "")))
+    if graph_names is None:
+        graph_names = _read_names_from_cfg_list(str(getattr(ds_cfg, "available_graph_datasets", "")))
 
-    node_names = _sorted_dataset_names(read_datasets(str(node_list_path)))
-    graph_names = _sorted_dataset_names(read_datasets(str(graph_list_path)))
+    node_names = _normalize_dataset_names(node_names)
+    graph_names = _normalize_dataset_names(graph_names)
 
     rows: List[DatasetSummaryRow] = []
     failures: List[str] = []
@@ -311,9 +402,9 @@ def run_data_summary(cfg) -> int:
             failures.append(f"{name} (graph): {exc}")
             print(f"[DataSummary][FAIL] {name} (graph): {exc}")
 
-    output_path = DEFAULT_OUTPUT_PATH
-    _rows_to_tsv(rows, output_path)
-    print(f"[DataSummary] Saved {len(rows)} dataset summaries to {output_path}")
+    output_path = Path(str(prep_cfg.summary_file))
+    total_rows = _rows_to_tsv(rows, output_path)
+    print(f"[DataSummary] Updated {len(rows)} dataset summaries into {output_path} (total={total_rows})")
 
     if failures:
         print(f"[DataSummary] Failed datasets: {len(failures)}")
