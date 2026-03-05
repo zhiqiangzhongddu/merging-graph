@@ -30,7 +30,7 @@ pip install torch-cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.1.1+cu118.h
 - Node- and edge-level dataset list: `data/available_node_datasets.tsv`.
 - Graph-level dataset list: `data/available_graph_datasets.tsv`.
 - Total available datasets: `50`.
-- `run_data_preparation.py` handles download, preprocessing, split generation, feature SVD, induced subgraphs, and subgraph SVD (based on config).
+- `run_data_preparation.py` handles download, preprocessing, split generation, feature SVD, induced subgraphs, and subgraph SVD (based on config). It also generates a dataset summary at `data/data_summary.tsv` for the datasets prepared in that run.
 - If `data_preparation.target_datasets` is empty, both TSV lists are prepared automatically.
 
 ```bash
@@ -55,9 +55,6 @@ python run_data_preparation.py
 
 # HPC execution (array job, one dataset per task)
 sbatch slurm/run_all_data_preparation.slurm
-
-# generate dataset summary at data/data_summary.tsv
-python run_data_summary.py
 ```
 
 ## Expert Models
