@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-from code.config import cfg as base_cfg, update_cfg
+from code.config import update_cfg
 from code.data_loader.dataset_prepare import prepare_datasets, read_datasets
 from code.data_loader.datasets import infer_task_level
 from code.data_loader.summary import run_data_summary
@@ -339,18 +339,7 @@ def _collect_summary_dataset_names(stages: List[_PrepStage]) -> Tuple[List[str],
 def run_data_preparation(cfg) -> int:
     """Main orchestrator used by `run_data_preparation.py`."""
     dp_cfg = cfg.data_preparation
-    ds_cfg = dp_cfg.dataset
-
-    # Backward compatibility: older configs may store target datasets directly
-    # under `cfg.data_preparation.dataset`.
-    fallback_targets = None
-    if not hasattr(ds_cfg, "root"):
-        fallback_targets = ds_cfg
-        cfg.data_preparation.dataset = base_cfg.data_preparation.dataset.clone()
-
     targets = _normalize_targets(getattr(dp_cfg, "target_datasets", None))
-    if (targets is None or targets == []) and fallback_targets is not None:
-        targets = _normalize_targets(fallback_targets)
 
     stages = _resolve_stage_plan(cfg, targets)
     if not stages:

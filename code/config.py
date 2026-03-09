@@ -146,7 +146,6 @@ def set_cfg(cfg: CN) -> CN:
     cfg.pretrain.attr_masking.edge_vocab_size = 0 # >0 enables CE edge-type prediction using edge_attr[:,0] as label
     # context_pred specific options
     cfg.pretrain.context_pred = CN()
-    cfg.pretrain.context_pred.temperature = 0.2 # legacy option (unused in cbow/skipgram mode)
     cfg.pretrain.context_pred.mode = "cbow" # cbow or skipgram
     cfg.pretrain.context_pred.context_pooling = "mean" # mean, sum, max
     cfg.pretrain.context_pred.neg_samples = 1 # number of negatives per positive pair
@@ -182,8 +181,7 @@ def set_cfg(cfg: CN) -> CN:
     cfg.pretrain.infograph.use_layerwise = True # use concatenated per-layer node/graph reps (InfoGraph paper setting)
     cfg.pretrain.infograph.prior = False # enable prior matching regularization
     cfg.pretrain.infograph.gamma = 0.1 # prior regularization coefficient
-    cfg.pretrain.infograph.temperature = 0.2 # retained for backward compatibility (unused by JSD objective)
-    
+
     # ------------------------------------------------------------------------ #
     # Fine-tune options
     # ------------------------------------------------------------------------ #
@@ -260,8 +258,6 @@ def set_cfg(cfg: CN) -> CN:
     cfg.finetune.gpf.encoder_lr = cfg.finetune.gpf.lr  # encoder lr when update_pretrained=True
     cfg.finetune.gpf.encoder_weight_decay = cfg.finetune.gpf.weight_decay  # encoder weight decay when update_pretrained=True
     cfg.finetune.gpf.freeze_encoder_bn_when_frozen = True  # keep frozen encoder BN stats fixed during prompt tuning
-    cfg.finetune.gpf.prefer_non_induced_node = True  # official GPF-style node tuning usually runs on original graph (non-induced)
-    cfg.finetune.gpf.monitor_train_loss = False  # when True, auto monitor train_loss even when val split exists
     cfg.finetune.gpf.disable_early_stopping = True  # official GPF scripts run fixed epochs
     # gppt finetuning method-specific options
     cfg.finetune.gppt = CN()
@@ -270,7 +266,6 @@ def set_cfg(cfg: CN) -> CN:
     cfg.finetune.gppt.weight_decay = 5e-4  # official GPPT prompt optimizer weight decay
     cfg.finetune.gppt.constraint_weight = 1e-2  # orthogonality regularization on task tokens
     cfg.finetune.gppt.force_freeze_encoder = False  # when True, tune prompts only and freeze encoder
-    cfg.finetune.gppt.concat_neighbor = True  # legacy switch: task_mode=concat when True, otherwise neighbor
     cfg.finetune.gppt.structure_mode = "concat"  # feature mode for StructureToken: node, neighbor, concat
     cfg.finetune.gppt.task_mode = "concat"  # feature mode for TaskToken heads: node, neighbor, concat
     cfg.finetune.gppt.add_self_loops = False  # add self-loops in mean-neighbor aggregation

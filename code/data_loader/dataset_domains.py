@@ -112,6 +112,7 @@ NAME_TO_DOMAIN = {
     "qm8": "molecules",
     "qm9": "molecules",
     "zinc": "molecules",
+    "zinc15": "molecules",
     "pepfunc": "molecules",
     "pepstruct": "molecules",
     "pcqm-contact": "molecules",

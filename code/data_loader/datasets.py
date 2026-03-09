@@ -1,4 +1,8 @@
+import csv
+import hashlib
 from numbers import Integral
+from urllib.request import urlretrieve
+from zipfile import ZipFile
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple, List
 import contextlib
@@ -8,14 +12,8 @@ import warnings
 import torch
 from torch.utils.data import Dataset, Subset
 from torch_geometric.data import Data
-try:
-    from torch_geometric.data import InMemoryDataset
-except Exception:  # pragma: no cover - older PyG variants
-    InMemoryDataset = None
-try:
-    from torch_geometric.data.data import DataEdgeAttr  # type: ignore
-except Exception:  # pragma: no cover - older PyG
-    DataEdgeAttr = None
+from torch_geometric.data import InMemoryDataset
+from torch_geometric.data.data import DataEdgeAttr  # type: ignore
 from torch_geometric.datasets import (
     Actor,
     Airports,
@@ -45,14 +43,12 @@ from torch_geometric.datasets import (
     WebKB,
     WikiCS,
     WikipediaNetwork,
+    ZINC,
 )
-from torch_geometric.loader import DataLoader
-try:
-    from torch_geometric.loader import LinkNeighborLoader
-except Exception:  # pragma: no cover - optional loader
-    LinkNeighborLoader = None
+from torch_geometric.loader import DataLoader, LinkNeighborLoader
 from torch_geometric.transforms import Compose
 from torch_geometric.utils import degree, k_hop_subgraph, negative_sampling, subgraph
+from torch_geometric.utils.smiles import from_smiles
 
 from code.utils import ensure_dir, format_split_for_name
 from .dataset_domains import (
@@ -132,8 +128,6 @@ def _set_dataset_data_storage(dataset, data_obj) -> None:
         dataset.__dict__["_data"] = data_obj
         return
     setattr(dataset, "data", data_obj)
-
-
 @contextlib.contextmanager
 def _force_ogb_prompts_yes():
     """Force OGB download/version prompts to auto-yes."""
@@ -183,10 +177,10 @@ EmailEUCore_NAMES = {
     "email-eu-core": "email_eu_core",
 }
 # Disabled datasets (source URLs currently 404).
-FacebookPagePage_NAMES = {}  # {"facebook_page-page"}
+# FacebookPagePage_NAMES = {"facebook_page-page"}
 Flickr_NAMES = {"flickr"}
-GemsecDeezer_NAMES = {}  # {"gemsec_deezer_hu": "HU", "gemsec_deezer_hr": "HR", "gemsec_deezer_ro": "RO"}
-GitHub_NAMES = {}
+# GemsecDeezer_NAMES = {"gemsec_deezer_hu": "HU", "gemsec_deezer_hr": "HR", "gemsec_deezer_ro": "RO"}
+# GitHub_NAMES = {}
 HeterophilousGraphDataset_NAMES = {
     "amazon-ratings": "Amazon-ratings",
     "minesweeper": "Minesweeper",
@@ -194,7 +188,7 @@ HeterophilousGraphDataset_NAMES = {
     "roman-empire": "Roman-empire",
     "tolokers": "Tolokers",
 }
-LastFMAsia_NAMES = {}
+# LastFMAsia_NAMES = {}
 LINKXDataset_NAMES = {
     "amherst41",
     "cornell5",
@@ -221,7 +215,7 @@ Planetoid_NAMES = {
 }
 Reddit_NAMES = {"reddit"}
 Reddit2_NAMES = {"reddit2"}
-Twitch_NAMES = {}  # {"twitch-de": "DE", ...} currently 404
+# Twitch_NAMES = {"twitch-de": "DE", ...}
 WebKB_NAMES = {"cornell", "texas", "wisconsin"}
 WikiCS_NAMES = {"wikics"}
 WikipediaNetwork_NAMES = {
@@ -250,6 +244,8 @@ MoleculeNet_NAMES = {
 }
 QM7b_NAMES = {"qm7b"}
 QM9_NAMES = {"qm9"}
+ZINC_NAMES = {"zinc"}
+ZINC15_NAMES = {"zinc15"}
 TUDataset_NAMES = {
     "collab": "COLLAB",
     "enzymes": "ENZYMES",
@@ -301,6 +297,8 @@ def _is_graph_dataset_key(key: str) -> bool:
         or key in LRGB_GRAPH_NAMES
         or key in QM7b_NAMES
         or key in QM9_NAMES
+        or key in ZINC_NAMES
+        or key in ZINC15_NAMES
         or key in TUDataset_NAMES
         or key.startswith("ogbg-")
     )
@@ -509,6 +507,8 @@ def is_regression_dataset(dataset, task_level: str) -> bool:
     """
     level = str(task_level).lower()
     if level == "edge":
+        return False
+    if getattr(dataset, "has_labels", True) is False:
         return False
 
     # Explicit class count indicates classification.
@@ -1209,6 +1209,179 @@ class InducedGraphDataset(Dataset):
             data.split = self.split_tags[idx]
         return data
 
+class ZINC15Dataset(Dataset):
+    """Lazy SMILES-backed loader for the 2M-molecule ZINC15 pretraining subset."""
+
+    url = "http://snap.stanford.edu/gnn-pretrain/data/chem_dataset.zip"
+    expected_md5 = "9126f2aab5f2cd3fccd307616eec6779"
+    member_path = "dataset/zinc_standard_agent/processed/smiles.csv"
+
+    def __init__(self, root: str, transform=None, sample_stats_size: int = 2048):
+        if from_smiles is None:
+            raise ImportError("torch_geometric.utils.smiles.from_smiles is required for ZINC15.")
+
+        self.root = _scoped_root(root, "zinc15")
+        self.transform = transform
+        self.sample_stats_size = max(1, int(sample_stats_size))
+
+        self.raw_dir = Path(self.root) / "raw"
+        self.processed_dir = Path(self.root) / "processed"
+        self.raw_zip_path = self.raw_dir / "chem_dataset.zip"
+        self.smiles_path = self.raw_dir / "smiles.csv"
+        self.index_path = self.processed_dir / "smiles_index.pt"
+        self._file_handle = None
+
+        self._ensure_ready()
+        metadata = self._load_or_build_index()
+        self.offsets = metadata["offsets"].to(torch.long)
+        self.num_graphs = int(metadata["num_graphs"])
+        self.avg_nodes_per_graph = float(metadata.get("avg_nodes_per_graph", 0.0))
+        self.avg_edges_per_graph = float(metadata.get("avg_edges_per_graph", 0.0))
+        self.total_nodes = int(round(self.avg_nodes_per_graph * self.num_graphs)) if self.avg_nodes_per_graph > 0 else None
+        self.total_edges = int(round(self.avg_edges_per_graph * self.num_graphs)) if self.avg_edges_per_graph > 0 else None
+        self.num_classes = None
+        self.has_labels = False
+
+    def _ensure_ready(self) -> None:
+        ensure_dir(str(self.raw_dir))
+        ensure_dir(str(self.processed_dir))
+
+        archive_ready = self._has_required_member(self.raw_zip_path)
+        if not archive_ready:
+            if self.raw_zip_path.is_file():
+                self.raw_zip_path.unlink()
+            print(f"[Dataset] Downloading ZINC15 from {self.url}")
+            urlretrieve(self.url, self.raw_zip_path)
+            if not self._has_required_member(self.raw_zip_path):
+                raise ValueError("Downloaded ZINC15 archive is invalid or missing the expected SMILES file.")
+        elif not self._check_md5(self.raw_zip_path, self.expected_md5):
+            print(
+                "[Dataset] ZINC15 archive MD5 differs from the historical TorchDrug value; "
+                "continuing after zip/member validation."
+            )
+
+        if not self.smiles_path.is_file():
+            print(f"[Dataset] Extracting {self.member_path} -> {self.smiles_path}")
+            with ZipFile(self.raw_zip_path, "r") as zf:
+                with zf.open(self.member_path) as src, open(self.smiles_path, "wb") as dst:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+
+    @staticmethod
+    def _check_md5(path: Path, expected_md5: str) -> bool:
+        if not path.is_file():
+            return False
+        digest = hashlib.md5()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest() == expected_md5
+
+    def _has_required_member(self, path: Path) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            with ZipFile(path, "r") as zf:
+                return self.member_path in zf.namelist()
+        except Exception:
+            return False
+
+    def _load_or_build_index(self) -> Dict[str, torch.Tensor | float | int]:
+        if self.index_path.is_file():
+            try:
+                payload = _safe_torch_load(self.index_path)
+                offsets = payload.get("offsets")
+                if torch.is_tensor(offsets) and offsets.numel() > 0:
+                    return payload
+            except Exception:
+                pass
+
+        offsets: List[int] = []
+        with open(self.smiles_path, "rb") as handle:
+            first_offset = handle.tell()
+            first_line = handle.readline()
+            if not first_line:
+                raise ValueError(f"Empty ZINC15 SMILES file: {self.smiles_path}")
+            first_text = first_line.decode("utf-8", errors="ignore").strip().split(",", 1)[0].strip().lower()
+            if first_text != "smiles":
+                offsets.append(first_offset)
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if line.strip():
+                    offsets.append(offset)
+
+        avg_nodes, avg_edges = self._estimate_graph_stats(offsets)
+        payload = {
+            "offsets": torch.tensor(offsets, dtype=torch.long),
+            "num_graphs": int(len(offsets)),
+            "avg_nodes_per_graph": float(avg_nodes),
+            "avg_edges_per_graph": float(avg_edges),
+        }
+        torch.save(payload, self.index_path)
+        return payload
+
+    def _estimate_graph_stats(self, offsets: List[int]) -> Tuple[float, float]:
+        if not offsets:
+            return 0.0, 0.0
+        sample_count = min(len(offsets), self.sample_stats_size)
+        node_total = 0
+        edge_total = 0
+        with open(self.smiles_path, "rb") as handle:
+            for offset in offsets[:sample_count]:
+                handle.seek(int(offset))
+                line = handle.readline().decode("utf-8", errors="ignore")
+                smiles = self._parse_smiles_line(line)
+                data = from_smiles(smiles)
+                node_total += int(data.num_nodes)
+                edge_total += int(data.num_edges)
+        return float(node_total) / float(sample_count), float(edge_total) / float(sample_count)
+
+    @staticmethod
+    def _parse_smiles_line(line: str) -> str:
+        row = next(csv.reader([line.strip()]))
+        if not row:
+            raise ValueError("Encountered empty SMILES row in ZINC15.")
+        return row[0].strip()
+
+    def _get_file_handle(self):
+        if self._file_handle is None or self._file_handle.closed:
+            self._file_handle = open(self.smiles_path, "rb")
+        return self._file_handle
+
+    def __len__(self):
+        return self.num_graphs
+
+    def __getitem__(self, idx):
+        total = len(self)
+        if idx < 0:
+            idx += total
+        if idx < 0 or idx >= total:
+            raise IndexError(f"ZINC15Dataset index out of range: {idx}")
+
+        handle = self._get_file_handle()
+        handle.seek(int(self.offsets[idx].item()))
+        line = handle.readline().decode("utf-8", errors="ignore")
+        smiles = self._parse_smiles_line(line)
+        data = from_smiles(smiles)
+        data.smiles = smiles
+        if self.transform is not None:
+            data = self.transform(data)
+        return data
+
+    def __del__(self):
+        handle = getattr(self, "_file_handle", None)
+        if handle is not None and not handle.closed:
+            handle.close()
+
 
 def _load_node_dataset(
     name: str, 
@@ -1307,6 +1480,11 @@ def _load_graph_dataset(
         return QM7b(_scoped_root(root, key), transform=transform)
     elif key in QM9_NAMES:
         return QM9(_scoped_root(root, key), transform=transform)
+    elif key in ZINC15_NAMES:
+        return ZINC15Dataset(root=root, transform=transform)
+    elif key in ZINC_NAMES:
+        subset = bool(ZINC_NAMES[key])
+        return ZINC(_scoped_root(root, "zinc"), subset=subset, split="train", transform=transform)
     elif key in TUDataset_NAMES:
         dataset_key = TUDataset_NAMES[key]
         # Ensure nested raw dir exists to avoid fs.ls errors when download checks for files
@@ -1353,8 +1531,9 @@ def create_dataset(
     """Create dataset based on name and task level with optional feature reduction."""
     transforms = [EnsureFeatureTransform()]
     reducer = None
+    use_inline_feature_reduction = task_level == "graph" and str(name).lower() in (set(ZINC_NAMES) | set(ZINC15_NAMES))
     if feat_reduction:
-        if persist_feature_svd:
+        if persist_feature_svd and not use_inline_feature_reduction:
             reducer = SafeSVDFeatureReduction(out_channels=feat_reduction_dim)
         else:
             transforms.append(SafeSVDFeatureReduction(out_channels=feat_reduction_dim))
@@ -1981,6 +2160,22 @@ def make_loaders(
         test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
         return train_loader, val_loader, test_loader
 
+    if task_level == "graph" and not induced and isinstance(dataset, ZINC) and raw_dataset_name.lower() in ZINC_NAMES:
+        loader_kwargs = dict(
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=True,
+            drop_last=drop_last_train,
+        )
+        subset = bool(ZINC_NAMES[raw_dataset_name.lower()])
+        train_ds = dataset
+        val_ds = ZINC(dataset.root, subset=subset, split="val", transform=dataset.transform)
+        test_ds = ZINC(dataset.root, subset=subset, split="test", transform=dataset.transform)
+        train_loader = DataLoader(train_ds, **loader_kwargs)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+        return train_loader, val_loader, test_loader
+
     if task_level == "node" and not induced:
         data = dataset[0]
         if not split_root:
@@ -2098,8 +2293,6 @@ def make_loaders(
         edge_cfg = edge_pred_cfg
         use_neighbor_sampling = bool(getattr(edge_cfg, "use_neighbor_sampling", False)) if edge_cfg else False
         if use_neighbor_sampling:
-            if LinkNeighborLoader is None:
-                raise ImportError("LinkNeighborLoader is required for neighbor sampling.")
             sizes = list(getattr(edge_cfg, "neighbor_sizes", [15, 10]))
             edge_batch_size = int(getattr(edge_cfg, "edge_batch_size", batch_size))
 
@@ -2233,6 +2426,37 @@ def dataset_info(
     induced: bool = False
 ) -> Dict:
     """Get meta information about the dataset."""
+
+    def _task_type(level: str) -> str:
+        if getattr(dataset, "has_labels", True) is False:
+            return "unlabeled"
+        return "regression" if is_regression_dataset(dataset, level) else "classification"
+
+    def _graph_aggregate_stats():
+        num_graphs = int(getattr(dataset, "num_graphs", len(dataset)))
+        total_nodes = getattr(dataset, "total_nodes", None)
+        total_edges = getattr(dataset, "total_edges", None)
+        avg_nodes = getattr(dataset, "avg_nodes_per_graph", None)
+        avg_edges = getattr(dataset, "avg_edges_per_graph", None)
+        if avg_nodes is not None and avg_edges is not None:
+            return num_graphs, round(float(avg_nodes), 2), round(float(avg_edges), 2)
+        if total_nodes is None or total_edges is None:
+            sample_count = min(num_graphs, 2048)
+            if sample_count <= 0:
+                return num_graphs, 0.0, 0.0
+            node_total = 0
+            edge_total = 0
+            for idx in range(sample_count):
+                graph = dataset[idx]
+                node_total += int(getattr(graph, "num_nodes", 0))
+                edge_total += int(getattr(graph, "num_edges", 0))
+            avg_nodes = float(node_total) / float(sample_count)
+            avg_edges = float(edge_total) / float(sample_count)
+            return num_graphs, round(avg_nodes, 2), round(avg_edges, 2)
+        avg_nodes = round(float(total_nodes) / num_graphs, 2) if num_graphs > 0 else 0.0
+        avg_edges = round(float(total_edges) / num_graphs, 2) if num_graphs > 0 else 0.0
+        return num_graphs, avg_nodes, avg_edges
+
     def _log_info(level: str, info: Dict) -> None:
         """Pretty-print dataset statistics."""
 
@@ -2256,11 +2480,12 @@ def dataset_info(
         data = dataset[0]
         if induced and not hasattr(dataset, "graphs"):
             raise RuntimeError("Induced node dataset missing graphs; generation failed.")
+        task_type = _task_type("node")
         num_classes = None
         label_dim = None
-        if hasattr(dataset, "num_classes") and dataset.num_classes is not None:
+        if task_type == "classification" and hasattr(dataset, "num_classes") and dataset.num_classes is not None:
             num_classes = dataset.num_classes
-        elif getattr(data, "y", None) is not None and data.y.numel() > 0:
+        elif task_type == "classification" and getattr(data, "y", None) is not None and data.y.numel() > 0:
             num_classes = int(data.y.max().item() + 1)
         if getattr(data, "y", None) is not None:
             y = torch.as_tensor(data.y)
@@ -2273,6 +2498,7 @@ def dataset_info(
             "num_node_features": data.num_node_features,
             "num_classes": num_classes,
             "label_dim": label_dim,
+            "task_type": task_type,
             "num_nodes": dataset.base_num_nodes if induced and getattr(dataset, "base_num_nodes", None) is not None else (len(dataset) if induced else data.num_nodes),
             "num_edges": dataset.base_num_edges if induced and getattr(dataset, "base_num_edges", None) is not None else data.num_edges,
         }
@@ -2287,11 +2513,12 @@ def dataset_info(
         data = dataset[0]
         if induced and not hasattr(dataset, "graphs"):
             raise RuntimeError("Induced edge dataset missing graphs; generation failed.")
+        task_type = _task_type("edge")
         num_classes = None
         label_dim = None
-        if hasattr(dataset, "num_classes") and dataset.num_classes is not None:
+        if task_type == "classification" and hasattr(dataset, "num_classes") and dataset.num_classes is not None:
             num_classes = dataset.num_classes
-        elif getattr(data, "y", None) is not None and data.y.numel() > 0:
+        elif task_type == "classification" and getattr(data, "y", None) is not None and data.y.numel() > 0:
             num_classes = int(data.y.max().item() + 1)
         if getattr(data, "y", None) is not None:
             y = torch.as_tensor(data.y)
@@ -2303,6 +2530,7 @@ def dataset_info(
             "num_node_features": data.num_node_features,
             "num_classes": num_classes,
             "label_dim": label_dim,
+            "task_type": task_type,
             "num_nodes": dataset.base_num_nodes if induced and getattr(dataset, "base_num_nodes", None) is not None else (len(dataset) if induced else data.num_nodes),
             "num_edges": dataset.base_num_edges if induced and getattr(dataset, "base_num_edges", None) is not None else data.num_edges,
         }
@@ -2315,6 +2543,7 @@ def dataset_info(
     
     elif task_level == "graph":
         sample = dataset[0]
+        task_type = _task_type("graph")
         sample_y = getattr(sample, "y", None)
         if sample_y is None:
             label_dim = None
@@ -2324,13 +2553,15 @@ def dataset_info(
                 label_dim = 1
             else:
                 label_dim = int(y.size(-1))
+        num_graphs, avg_nodes, avg_edges = _graph_aggregate_stats()
         info = {
             "num_node_features": sample.num_features,
-            "num_classes": dataset.num_classes if hasattr(dataset, "num_classes") else None,
+            "num_classes": dataset.num_classes if task_type == "classification" and hasattr(dataset, "num_classes") else None,
             "label_dim": label_dim,
-            "num_graphs": len(dataset),
-            "avg_nodes_per_graph": round(float(sum(g.num_nodes for g in dataset) / len(dataset)), 2),
-            "avg_edges_per_graph": round(float(sum(g.num_edges for g in dataset) / len(dataset)), 2),
+            "task_type": task_type,
+            "num_graphs": num_graphs,
+            "avg_nodes_per_graph": avg_nodes,
+            "avg_edges_per_graph": avg_edges,
         }
         _log_info("induced-graph" if induced else "graph", info)
         return info

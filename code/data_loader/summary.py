@@ -68,7 +68,21 @@ def _sum_from_slices(dataset, key: str) -> Optional[int]:
 
 
 def _compute_graph_totals(dataset) -> tuple[int, int, int]:
-    num_graphs = int(len(dataset))
+    num_graphs = int(getattr(dataset, "num_graphs", len(dataset)))
+    total_nodes = getattr(dataset, "total_nodes", None)
+    total_edges = getattr(dataset, "total_edges", None)
+    if total_nodes is not None and total_edges is not None:
+        return num_graphs, int(total_nodes), int(total_edges)
+
+    avg_nodes = getattr(dataset, "avg_nodes_per_graph", None)
+    avg_edges = getattr(dataset, "avg_edges_per_graph", None)
+    if avg_nodes is not None and avg_edges is not None:
+        return (
+            num_graphs,
+            int(round(float(avg_nodes) * float(num_graphs))),
+            int(round(float(avg_edges) * float(num_graphs))),
+        )
+
     total_nodes = _sum_from_slices(dataset, "x")
     total_edges = _sum_from_slices(dataset, "edge_index")
 
@@ -184,9 +198,14 @@ def _summarize_node_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
     edge_index = getattr(data, "edge_index", None)
     num_edges = int(edge_index.size(1)) if edge_index is not None else 0
 
+    unlabeled = getattr(dataset, "has_labels", True) is False
     regression = is_regression_dataset(dataset, "node")
-    task = "regression" if regression else "classification"
-    num_labels = -1 if regression else _num_classes_for_classification(dataset, "node")
+    if unlabeled:
+        task = "unlabeled"
+        num_labels = -1
+    else:
+        task = "regression" if regression else "classification"
+        num_labels = -1 if regression else _num_classes_for_classification(dataset, "node")
     num_features = _num_features(dataset, "node")
 
     return DatasetSummaryRow(
@@ -216,9 +235,14 @@ def _summarize_graph_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
     avg_nodes = float(total_nodes) / float(num_graphs) if num_graphs > 0 else 0.0
     avg_edges = float(total_edges) / float(num_graphs) if num_graphs > 0 else 0.0
 
+    unlabeled = getattr(dataset, "has_labels", True) is False
     regression = is_regression_dataset(dataset, "graph")
-    task = "regression" if regression else "classification"
-    num_labels = -1 if regression else _num_classes_for_classification(dataset, "graph")
+    if unlabeled:
+        task = "unlabeled"
+        num_labels = -1
+    else:
+        task = "regression" if regression else "classification"
+        num_labels = -1 if regression else _num_classes_for_classification(dataset, "graph")
     num_features = _num_features(dataset, "graph")
 
     return DatasetSummaryRow(

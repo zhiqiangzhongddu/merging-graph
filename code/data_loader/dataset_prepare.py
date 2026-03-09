@@ -49,22 +49,6 @@ def _feature_svd_path(dataset_name: str, task_level: str, dim: int, output_dir: 
     return scoped_dir / f"feature_svd_{dataset_name}{suffix}_d{dim}.pt"
 
 
-def _legacy_feature_svd_path(dataset_name: str, task_level: str, dim: int, output_dir: str) -> Path:
-    suffix = _feature_task_suffix(task_level)
-    scoped_dir = Path(_dataset_scoped_dir(output_dir, dataset_name))
-    return scoped_dir / f"svd_cache_{dataset_name}{suffix}_d{dim}.pt"
-
-
-def _feature_svd_old_path(dataset_name: str, dim: int, output_dir: str) -> Path:
-    scoped_dir = Path(_dataset_scoped_dir(output_dir, dataset_name))
-    return scoped_dir / f"feature_svd_{dataset_name}_d{dim}.pt"
-
-
-def _legacy_feature_svd_old_path(dataset_name: str, dim: int, output_dir: str) -> Path:
-    scoped_dir = Path(_dataset_scoped_dir(output_dir, dataset_name))
-    return scoped_dir / f"svd_cache_{dataset_name}_d{dim}.pt"
-
-
 def _print_feature_svd_info(
     dataset_name: str,
     task_level: str,
@@ -77,18 +61,6 @@ def _print_feature_svd_info(
     primary = _feature_svd_path(dataset_name, task_level, int(feat_reduction_dim), feature_svd_dir)
     if primary.exists():
         print(f"[FeatureSVD] Ready features at {primary}")
-        return
-    legacy = _legacy_feature_svd_path(dataset_name, task_level, int(feat_reduction_dim), feature_svd_dir)
-    if legacy.exists():
-        print(f"[FeatureSVD] Ready features at {legacy}")
-        return
-    old_primary = _feature_svd_old_path(dataset_name, int(feat_reduction_dim), feature_svd_dir)
-    if old_primary.exists():
-        print(f"[FeatureSVD] Ready features at {old_primary}")
-        return
-    old_legacy = _legacy_feature_svd_old_path(dataset_name, int(feat_reduction_dim), feature_svd_dir)
-    if old_legacy.exists():
-        print(f"[FeatureSVD] Ready features at {old_legacy}")
 
 
 def _split_dataset_name(dataset_name: str, task_level: str, seed: int) -> str:
@@ -311,22 +283,25 @@ def _filter_unsupported_split_defs(
     """Drop unsupported split definitions for the given dataset/task pair."""
     if not split_defs:
         return split_defs
-    if not is_regression_dataset(dataset_obj, task_level):
-        return split_defs
 
     kept: List[Tuple[float, float, float]] = []
     skipped: List[Tuple[float, float, float]] = []
+    regression = is_regression_dataset(dataset_obj, task_level)
+    missing_graph_labels = (
+        str(task_level).lower() == "graph"
+        and not regression
+        and _classification_label_count(dataset_obj=dataset_obj, task_level="graph") is None
+    )
+
     for split_def in split_defs:
-        if _is_few_shot_split_def(split_def):
+        if _is_few_shot_split_def(split_def) and (regression or missing_graph_labels):
             skipped.append(split_def)
         else:
             kept.append(split_def)
 
     for split_def in skipped:
-        print(
-            f"[DataPrep][Split] Skip unsupported few-shot split for regression "
-            f"dataset={dataset_name} task={task_level} split={split_def}"
-        )
+        reason = "regression" if regression else "unlabeled"
+        print(f"[DataPrep][Split] Skip unsupported few-shot split for {reason} dataset={dataset_name} task={task_level} split={split_def}")
     return kept
 
 
@@ -576,6 +551,9 @@ def _label_count_from_tensor(labels: torch.Tensor) -> Optional[int]:
 
 def _classification_label_count(dataset_obj, task_level: str) -> Optional[int]:
     """Count class labels for classification node/graph datasets."""
+    if getattr(dataset_obj, "has_labels", True) is False:
+        return None
+
     num_classes = getattr(dataset_obj, "num_classes", None)
     try:
         if num_classes is not None and int(num_classes) > 0:
@@ -676,7 +654,9 @@ def _log_graph_dataset_overview(dataset: str, dataset_obj) -> None:
         f"task=graph",
         f"graphs={num_graphs if num_graphs is not None else '?'}",
     ]
-    if not is_regression_dataset(dataset_obj, "graph"):
+    if getattr(dataset_obj, "has_labels", True) is False:
+        parts.append("labels=unlabeled")
+    elif not is_regression_dataset(dataset_obj, "graph"):
         num_labels = _classification_label_count(dataset_obj=dataset_obj, task_level="graph")
         parts.append(f"labels={num_labels if num_labels is not None else '?'}")
     print("[DataPrep][Dataset] " + ", ".join(parts))
