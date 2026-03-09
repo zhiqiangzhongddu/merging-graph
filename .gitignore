@@ -15,17 +15,25 @@ data/induced_subgraphs/*
 data/subgraph_svd/*
 !data/subgraph_svd/.gitkeep
 
+# ignore trained models but keep .gitkeep for directory structure
 trained_models/*
 !trained_models/.gitkeep
 
+# ignore pretrained models but keep .gitkeep for directory structure
 pretrained_models/*
 !pretrained_models/.gitkeep
 
+# ignore finetuned models but keep .gitkeep for directory structure
 finetuned_models/*
 !finetuned_models/.gitkeep
 
+# ignore slurm output files but keep .gitkeep for directory structure
 slurm/output/*
 !slurm/output/.gitkeep
 
+# ignore Hugging Face files but keep operation.sh for running the code
 huggingface/*
 !huggingface/operation.sh
+
+# ignore folder where we store the official implementations for comparison
+baselines/*
