@@ -96,8 +96,6 @@ class FinetuneRunner:
         self.run_name = self._build_run_name()
         self.run_group = _checkpoint_dataset_dir_name(target_ds["name"])
         self.run_dir = os.path.join(self.cfg.finetune.checkpoint_dir, self.run_group)
-        # Backward-compatible lookup for checkpoints saved by the previous layout.
-        self.legacy_run_dir = os.path.join(self.cfg.finetune.checkpoint_dir, self.run_name)
         self._skip_due_to_existing_checkpoint = False
         ckpt_path = self._existing_checkpoint_path()
         if getattr(self.cfg.finetune, "skip_if_exists", True) and ckpt_path is not None:
@@ -579,7 +577,7 @@ class FinetuneRunner:
         if method == "graphprompt":
             gp_cfg = getattr(finetune_cfg, "graphprompt", None)
             plus = int(bool(getattr(gp_cfg, "plus", False))) if gp_cfg is not None else 0
-            score_mode = str(getattr(gp_cfg, "score_mode", "auto") or "auto").lower()
+            score_mode = str(getattr(gp_cfg, "score_mode", "neg_distance") or "neg_distance").lower()
             return f"plus{plus}_{score_mode}"
         return ""
 
@@ -650,20 +648,14 @@ class FinetuneRunner:
     def _checkpoint_path(self) -> str:
         return os.path.join(self.run_dir, f"{self.run_name}.pt")
 
-    def _legacy_checkpoint_path(self) -> str:
-        return os.path.join(self.legacy_run_dir, f"{self.run_name}.pt")
-
     def _existing_checkpoint_path(self) -> str | None:
         ckpt_path = self._checkpoint_path()
         if os.path.isfile(ckpt_path):
             return ckpt_path
-        legacy_ckpt = self._legacy_checkpoint_path()
-        if os.path.isfile(legacy_ckpt):
-            return legacy_ckpt
         return None
 
     def get_checkpoint_path_for_metrics(self) -> str:
-        return self._existing_checkpoint_path() or self._checkpoint_path()
+        return self._checkpoint_path()
 
     def _log_path(self) -> str:
         return os.path.join(self.run_dir, f"{self.run_name}_log.json")

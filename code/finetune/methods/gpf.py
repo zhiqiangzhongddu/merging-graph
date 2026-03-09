@@ -28,19 +28,8 @@ class FinetuneGPF(FinetuneTask):
 
         method_cfg = getattr(cfg.finetune, "gpf", None)
         plus_flag = self._to_bool(getattr(method_cfg, "plus", False)) if method_cfg else False
-        legacy_variant = (
-            str(
-                getattr(
-                    method_cfg,
-                    "variant",
-                    getattr(method_cfg, "tuning_type", getattr(method_cfg, "prompt_type", "gpf")),
-                )
-            )
-            .lower()
-            .replace("-", "_")
-        )
-        variant = "gpf_plus" if plus_flag else legacy_variant
-        p_num = int(getattr(method_cfg, "p_num", getattr(method_cfg, "pnum", 20))) if method_cfg else 20
+        variant = "gpf_plus" if plus_flag else "gpf"
+        p_num = int(getattr(method_cfg, "p_num", 20)) if method_cfg else 20
 
         self.prompt_in_dim = int(getattr(cfg.model, "in_dim", 0) or 0)
         if self.prompt_in_dim <= 0:

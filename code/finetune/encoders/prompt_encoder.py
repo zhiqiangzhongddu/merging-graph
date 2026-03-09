@@ -185,7 +185,6 @@ class PromptGNNEncoder(nn.Module):
         self,
         data,
         prompt=None,
-        prompt_type: Optional[str] = None,
     ):
         x, edge_index = data.x, getattr(data, "edge_index", None)
         batch = getattr(data, "batch", None)
@@ -195,7 +194,7 @@ class PromptGNNEncoder(nn.Module):
 
         for idx, conv in enumerate(self.convs):
             edge_prompt = None
-            if prompt is not None and prompt_type in ("EdgePrompt", "EdgePromptplus", "edgeprompt", "edgepromptplus"):
+            if prompt is not None:
                 edge_prompt = prompt.get_prompt(x, edge_index, layer=idx)
 
             x = conv(x, edge_index, edge_prompt=edge_prompt)
@@ -239,17 +238,11 @@ def resolve_edgeprompt_add_self_loops_from_cfg(cfg) -> bool:
 
     Priority:
     1. `finetune.edgeprompt.add_self_loops`
-    2. legacy `finetune.prompt.edgeprompt_add_self_loops`
-    3. auto default (`True` for GCN, `False` otherwise)
+    2. auto default (`True` for GCN, `False` otherwise)
     """
     finetune_cfg = getattr(cfg, "finetune", None)
     method_cfg = getattr(finetune_cfg, "edgeprompt", None)
     raw = getattr(method_cfg, "add_self_loops", None) if method_cfg is not None else None
-
-    if raw is None:
-        legacy_cfg = getattr(finetune_cfg, "prompt", None)
-        if legacy_cfg is not None and hasattr(legacy_cfg, "edgeprompt_add_self_loops"):
-            raw = getattr(legacy_cfg, "edgeprompt_add_self_loops")
 
     if raw is None:
         model_name = str(getattr(getattr(cfg, "model", None), "name", "gcn") or "gcn").lower()

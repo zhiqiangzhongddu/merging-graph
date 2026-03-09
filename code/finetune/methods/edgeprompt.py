@@ -32,20 +32,15 @@ class FinetuneEdgePrompt(FinetuneTask):
             raise ValueError("EdgePrompt currently supports classification tasks only.")
 
         method_cfg = getattr(cfg.finetune, "edgeprompt", None)
-        legacy_cfg = getattr(cfg.finetune, "prompt", None)
         self.method_cfg = method_cfg
 
         use_plus = True
         if method_cfg is not None and hasattr(method_cfg, "plus"):
             use_plus = bool(getattr(method_cfg, "plus"))
-        elif legacy_cfg is not None and hasattr(legacy_cfg, "edgeprompt_plus"):
-            use_plus = bool(getattr(legacy_cfg, "edgeprompt_plus"))
 
         raw_anchors = None
         if method_cfg is not None and hasattr(method_cfg, "num_anchors"):
             raw_anchors = getattr(method_cfg, "num_anchors")
-        elif legacy_cfg is not None and hasattr(legacy_cfg, "edgeprompt_num_anchors"):
-            raw_anchors = getattr(legacy_cfg, "edgeprompt_num_anchors")
         num_anchors = None if raw_anchors is None else int(raw_anchors)
         if num_anchors is None:
             # Follow official defaults: node-style downstream uses more anchors.
@@ -54,8 +49,6 @@ class FinetuneEdgePrompt(FinetuneTask):
         raw_add_self_loops = None
         if method_cfg is not None and hasattr(method_cfg, "add_self_loops"):
             raw_add_self_loops = getattr(method_cfg, "add_self_loops")
-        elif legacy_cfg is not None and hasattr(legacy_cfg, "edgeprompt_add_self_loops"):
-            raw_add_self_loops = getattr(legacy_cfg, "edgeprompt_add_self_loops")
 
         if raw_add_self_loops is None:
             # Official graph EdgePromptplus does not add self-loops in prompt construction.
@@ -93,7 +86,6 @@ class FinetuneEdgePrompt(FinetuneTask):
                 dim_list=dim_list,
                 add_self_loops=add_self_loops,
             )
-        self.prompt_type = "EdgePromptplus" if use_plus else "EdgePrompt"
         self.classifier = nn.Linear(cfg.model.out_dim, self.num_classes)
 
     def parameters_to_optimize(self):
@@ -135,7 +127,7 @@ class FinetuneEdgePrompt(FinetuneTask):
         return_logits: bool = False,
     ) -> Tuple[torch.Tensor, float]:
         data = data.to(device)
-        node_repr, graph_repr = model(data, prompt=self.prompt, prompt_type=self.prompt_type)
+        node_repr, graph_repr = model(data, prompt=self.prompt)
 
         if self.task_level == "node":
             logits = self.classifier(node_repr)

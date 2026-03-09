@@ -1,7 +1,7 @@
 import os
 import random
 from numbers import Integral
-from typing import Dict, Optional
+from typing import Dict
 import numpy as np
 import torch
 
@@ -43,16 +43,8 @@ def format_split_for_name(split) -> str:
     return f"split{suffix}"
 
 
-def build_run_name_from_cfg(cfg, include_split: Optional[bool] = None) -> str:
-    """
-    Mirror the pretrainer run-name convention using the current cfg.
-
-    Args:
-        include_split:
-            - None: include split tag only for supervised pretraining.
-            - True: always include split tag when available.
-            - False: never include split tag.
-    """
+def build_run_name_from_cfg(cfg) -> str:
+    """Mirror the pretrainer run-name convention using the current cfg."""
     dataset_cfg = getattr(getattr(cfg, "pretrain", None), "dataset", None) or getattr(cfg, "dataset", None)
     model_cfg = getattr(cfg, "model", None)
     pretrain_cfg = getattr(cfg, "pretrain", None)
@@ -70,11 +62,7 @@ def build_run_name_from_cfg(cfg, include_split: Optional[bool] = None) -> str:
     batch_size = getattr(pretrain_cfg, "batch_size", "")
     seed = getattr(cfg, "seed", "")
     method = getattr(pretrain_cfg, "method", "method") if pretrain_cfg else "method"
-    if include_split is None:
-        include_split_effective = str(method).lower() == "supervised"
-    else:
-        include_split_effective = bool(include_split)
-    split_tag = format_split_for_name(split) if include_split_effective else ""
+    split_tag = format_split_for_name(split) if str(method).lower() == "supervised" else ""
 
     parts = [
         method,

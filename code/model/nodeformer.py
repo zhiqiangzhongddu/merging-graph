@@ -1,10 +1,8 @@
 """
 NodeFormer implementation vendored from https://github.com/qitianwu/NodeFormer (commit main),
-with a small QR-compatibility helper for torch>=2.1 and a thin encoder wrapper that returns
-(node_repr, graph_repr) to match the project interface.
+with a thin encoder wrapper that returns (node_repr, graph_repr) to match the project interface.
 """
 import math
-import os
 from typing import Callable, Optional, Tuple
 
 import numpy as np
@@ -18,13 +16,6 @@ from torch_sparse import SparseTensor, matmul
 BIG_CONSTANT = 1e8
 
 
-def _qr(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compatibility wrapper for QR to support torch>=2.1."""
-    if hasattr(torch.linalg, "qr"):
-        return torch.linalg.qr(x)
-    return torch.qr(x)
-
-
 def create_projection_matrix(m, d, seed=0, scaling=0, struct_mode=False):
     nb_full_blocks = int(m / d)
     block_list = []
@@ -35,7 +26,7 @@ def create_projection_matrix(m, d, seed=0, scaling=0, struct_mode=False):
             q = create_products_of_givens_rotations(d, current_seed)
         else:
             unstructured_block = torch.randn((d, d))
-            q, _ = _qr(unstructured_block)
+            q, _ = torch.linalg.qr(unstructured_block)
             q = torch.t(q)
         block_list.append(q)
         current_seed += 1
@@ -46,7 +37,7 @@ def create_projection_matrix(m, d, seed=0, scaling=0, struct_mode=False):
             q = create_products_of_givens_rotations(d, current_seed)
         else:
             unstructured_block = torch.randn((d, d))
-            q, _ = _qr(unstructured_block)
+            q, _ = torch.linalg.qr(unstructured_block)
             q = torch.t(q)
         block_list.append(q[0:remaining_rows])
     final_matrix = torch.vstack(block_list)
@@ -190,9 +181,7 @@ def kernelized_gumbel_softmax(query, key, value, kernel_transformation, projecti
     key_prime = key_prime.permute(1, 0, 2, 3)  # [N, B, H, M]
     value = value.permute(1, 0, 2, 3)  # [N, B, H, D]
 
-    gumbels = (
-        -torch.empty(key_prime.shape[:-1] + (K,), memory_format=torch.legacy_contiguous_format).exponential_().log()
-    ).to(query.device) / tau  # [N, B, H, K]
+    gumbels = -torch.empty(key_prime.shape[:-1] + (K,), device=query.device).exponential_().log() / tau  # [N, B, H, K]
     key_t_gumbel = key_prime.unsqueeze(3) * gumbels.exp().unsqueeze(4)  # [N, B, H, K, M]
     z_num = numerator_gumbel(query_prime, key_t_gumbel, value)  # [N, B, H, K, D]
     z_den = denominator_gumbel(query_prime, key_t_gumbel)  # [N, B, H, K]

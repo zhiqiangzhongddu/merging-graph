@@ -188,51 +188,6 @@ def feature_masking(data, p: float):
     return aug
 
 
-def rw_subgraph(data, restart_prob: float = 0.15, num_seeds_ratio: float = 0.3):
-    """Random walk subgraph sampling.
-
-    Args:
-        data: Input graph data
-        restart_prob: Probability of restarting the random walk
-        num_seeds_ratio: Ratio of nodes to use as seeds
-    """
-    aug = data.clone()
-    if aug.x is None or getattr(aug, "edge_index", None) is None:
-        return aug
-
-    num_nodes = aug.x.size(0)
-    num_seeds = max(1, int(num_nodes * num_seeds_ratio))
-
-    seed_indices = torch.randperm(num_nodes, device=aug.x.device)[:num_seeds]
-    visited_mask = torch.zeros(num_nodes, dtype=torch.bool, device=aug.x.device)
-    visited_mask[seed_indices] = True
-    edge_index = aug.edge_index
-
-    src = edge_index[0]
-    dst = edge_index[1]
-    for seed in seed_indices:
-        current = seed.item()
-        walk_length = random.randint(5, 15)
-
-        for _ in range(walk_length):
-            if random.random() < restart_prob:
-                current = seed.item()
-                continue
-
-            neighbors = dst[src == current]
-            if neighbors.size(0) == 0:
-                break
-
-            next_node = neighbors[torch.randint(neighbors.size(0), (1,), device=neighbors.device)].item()
-            visited_mask[next_node] = True
-            current = next_node
-
-    if int(visited_mask.sum().item()) < max(3, int(num_nodes * 0.2)):
-        return aug
-
-    return _subset_nodes(aug, visited_mask)
-
-
 class _Projector(nn.Module):
     """Projection head for contrastive learning."""
     def __init__(self, in_dim: int, hidden_dim: int):
@@ -263,14 +218,7 @@ class GraphCL(PretrainTask):
         self.feature_mask_prob = cfg.pretrain.graphcl.feature_mask_prob
         self.permE_add_edges = bool(getattr(cfg.pretrain.graphcl, "permE_add_edges", False))
         self.use_subgraph_aug = bool(getattr(cfg.pretrain.graphcl, "use_subgraph_aug", True))
-        # Backward compatibility: prefer explicit subgraph_ratio; fall back to legacy rw ratio field.
-        self.subgraph_ratio = float(
-            getattr(
-                cfg.pretrain.graphcl,
-                "subgraph_ratio",
-                getattr(cfg.pretrain.graphcl, "rw_num_seeds_ratio", 0.3),
-            )
-        )
+        self.subgraph_ratio = float(getattr(cfg.pretrain.graphcl, "subgraph_ratio", 0.3))
 
         # Augmentations from GraphCL family.
         self.augmentations: List[Callable] = [

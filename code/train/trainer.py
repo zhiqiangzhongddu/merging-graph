@@ -140,8 +140,6 @@ class TrainRunner:
         self.run_name = self._build_run_name()
         self.run_group = self._build_run_group()
         self.run_dir = os.path.join(self.cfg.train.checkpoint_dir, self.run_group)
-        # Backward-compatible lookup for checkpoints saved by the previous layout.
-        self.legacy_run_dir = os.path.join(self.cfg.train.checkpoint_dir, self.run_name)
         self._skip_due_to_existing_checkpoint = False
         ckpt_path = self._existing_checkpoint_path()
         if getattr(self.cfg.train, "skip_if_exists", False) and ckpt_path is not None:
@@ -327,20 +325,14 @@ class TrainRunner:
     def _checkpoint_path(self) -> str:
         return os.path.join(self.run_dir, f"{self.run_name}.pt")
 
-    def _legacy_checkpoint_path(self) -> str:
-        return os.path.join(self.legacy_run_dir, f"{self.run_name}.pt")
-
     def _existing_checkpoint_path(self) -> str | None:
         ckpt_path = self._checkpoint_path()
         if os.path.isfile(ckpt_path):
             return ckpt_path
-        legacy_ckpt = self._legacy_checkpoint_path()
-        if os.path.isfile(legacy_ckpt):
-            return legacy_ckpt
         return None
 
     def get_checkpoint_path_for_metrics(self) -> str:
-        return self._existing_checkpoint_path() or self._checkpoint_path()
+        return self._checkpoint_path()
 
     def _log_path(self) -> str:
         return os.path.join(self.run_dir, f"{self.run_name}_log.json")

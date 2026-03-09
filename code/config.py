@@ -170,8 +170,6 @@ def set_cfg(cfg: CN) -> CN:
     cfg.pretrain.graphcl.feature_mask_prob = 0.1 # feature masking probability
     cfg.pretrain.graphcl.use_subgraph_aug = True # whether to use subgraph augmentation in addition to node/edge/feature perturbations
     cfg.pretrain.graphcl.subgraph_ratio = 0.2 # node-keep ratio for GraphCL subgraph augmentation
-    cfg.pretrain.graphcl.rw_restart_prob = 0.15 # random walk restart probability
-    cfg.pretrain.graphcl.rw_num_seeds_ratio = 0.3 # ratio of seed nodes for random walk
     cfg.pretrain.graphcl.temperature = 0.1 # temperature for contrastive loss (GraphCL default)
     cfg.pretrain.graphcl.proj_hidden = 256 # projection head hidden dimension
     # infograph specific options

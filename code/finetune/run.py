@@ -14,43 +14,10 @@ from code.config import cfg as base_cfg, update_cfg
 from code.utils import set_seed
 
 from .finetuner import FinetuneRunner
-from .utils import extract_few_shot, resolve_pretrained_checkpoint, run_finetune_tasks
+from .utils import resolve_pretrained_checkpoint, run_finetune_tasks
 
 MetricDict = Dict[str, float]
 _SUMMARY_EXCLUDED_METRICS = {"batch_size", "test_loss"}
-
-
-def _normalize_dataset_aliases(argv: List[str]) -> List[str]:
-    """
-    Support `dataset.*` CLI aliases by remapping to finetune and pretrain blocks.
-
-    This keeps legacy CLI invocations working while still allowing explicit
-    `finetune.dataset.*` and `pretrain.dataset.*` overrides.
-    """
-    normalized: List[str] = []
-    idx = 0
-    while idx < len(argv):
-        token = argv[idx]
-        if token == "--config":
-            normalized.append(token)
-            if idx + 1 < len(argv):
-                normalized.append(argv[idx + 1])
-            idx += 2
-            continue
-        if token.startswith("--"):
-            normalized.append(token)
-            idx += 1
-            continue
-        if idx + 1 >= len(argv):
-            normalized.append(token)
-            break
-        value = argv[idx + 1]
-        if token.startswith("dataset."):
-            normalized.extend([f"finetune.{token}", value, f"pretrain.{token}", value])
-        else:
-            normalized.extend([token, value])
-        idx += 2
-    return normalized
 
 
 def _resolve_run_seeds(cfg) -> List[int]:
@@ -169,20 +136,8 @@ def _resolve_checkpoint_once(cfg) -> Tuple[Optional[str], Optional[str], int]:
 
 
 def _build_finetune_cfg(argv: Iterable[str]):
-    """
-    Parse CLI overrides for finetuning.
-
-    `few_shot` is accepted as a compatibility alias for
-    `finetune.dataset.fixed_split`.
-    """
-    raw_argv = list(argv)
-    forwarded_argv, few_shot_split = extract_few_shot(raw_argv)
-    normalized_argv = _normalize_dataset_aliases(forwarded_argv)
-    cfg = update_cfg(base_cfg, " ".join(normalized_argv))
-
-    if few_shot_split is not None:
-        cfg.finetune.dataset.fixed_split = few_shot_split
-    return cfg
+    """Parse CLI overrides for finetuning."""
+    return update_cfg(base_cfg, " ".join(list(argv)))
 
 
 def run_finetune(cfg) -> int:
