@@ -4,7 +4,7 @@ from numbers import Integral
 from urllib.request import urlretrieve
 from zipfile import ZipFile
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List
 import contextlib
 import re
 import warnings
@@ -128,6 +128,8 @@ def _set_dataset_data_storage(dataset, data_obj) -> None:
         dataset.__dict__["_data"] = data_obj
         return
     setattr(dataset, "data", data_obj)
+
+
 @contextlib.contextmanager
 def _force_ogb_prompts_yes():
     """Force OGB download/version prompts to auto-yes."""
@@ -1387,7 +1389,6 @@ def _load_node_dataset(
     name: str, 
     root: str, 
     transform,
-    force_reload_raw: bool = False,
 ):
     """Load node-level dataset by name."""
 
@@ -1429,12 +1430,10 @@ def _load_node_dataset(
         dataset_key = LRGB_NODE_NAMES.get(key) or LRGB_EDGE_NAMES[key]
         return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in Planetoid_NAMES:
-        # force_reload_raw lets us rebuild processed data from raw without deleting caches.
         return Planetoid(
             _scoped_root(root, key),
             Planetoid_NAMES[key],
             transform=transform,
-            force_reload=force_reload_raw,
         )
     elif key in Reddit_NAMES:
         return Reddit(_scoped_root(root, "reddit"), transform=transform)
@@ -1514,18 +1513,11 @@ def create_dataset(
     induced_max_size: int = 30,
     induced_max_hops: int = 5,
     edge_max_size: int | None = 60,
-    edge_sample_ratio: float | None = None,
-    edge_sample_max: int | None = 100000,
-    edge_sample_seed: int = 42,
-    edge_supervised: bool = True,
-    edge_neg_ratio: float = 1.0,
-    edge_neg_seed: int = 42,
     cache_induced: bool = True,
     split: Tuple[float, float, float] | None = None,
     seed: int = 42,
     split_root: str = "",
     induced_root: str = "",
-    force_reload_raw: bool = False,
 ):
     """Create dataset based on name and task level with optional feature reduction."""
     transforms = [EnsureFeatureTransform()]
@@ -1544,7 +1536,6 @@ def create_dataset(
                 name=name, 
                 root=root, 
                 transform=transform,
-                force_reload_raw=force_reload_raw,
             )
             if reducer and hasattr(base_dataset, "data") and persist_feature_svd:
                 _apply_feature_svd(
@@ -1847,9 +1838,11 @@ def _feature_task_suffix(task_level: str | None) -> str:
         return "_edge"
     if task_level == "graph":
         return "_graph"
-    if task_level == "node" or task_level is None:
+    if task_level == "node":
         return "_node"
-    return f"_{str(task_level)}"
+    if task_level is None:
+        return ""
+    raise ValueError(f"Unsupported task level for feature SVD: {task_level}")
 
 
 def _feature_svd_path(dataset_root: str, name: str, dim: int, task_level: str | None = None) -> Path:

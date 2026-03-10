@@ -108,7 +108,6 @@ class PretrainRunner:
             induced_root=_shared_induced_root(self.cfg, getattr(ds_cfg, "induced_root", "")),
             split=split_for_dataset,
             seed=self.cfg.seed,
-            force_reload_raw=getattr(ds_cfg, "force_reload_raw", False),
         )
         # Induced subgraphs are handled as graph-level datasets downstream
         effective_task_level = "graph" if induced else raw_task_level

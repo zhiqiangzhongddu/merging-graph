@@ -25,7 +25,6 @@ def _default_dataset_cfg() -> CN:
     ds.induced_max_size = 30 # max number of nodes for induced subgraphs
     ds.induced_max_hops = 5 # max hops to consider when building induced subgraphs
     ds.induced_root = "data/induced_subgraphs" # output directory for induced subgraphs
-    ds.force_reload_raw = False  # when True, force reload raw data (reprocess) even if processed cache exists
     ds.subgraph_svd = True  # generate subgraph SVD features during data prep
     ds.subgraph_svd_feat_dim = 100 # subgraph SVD feature dimension
     ds.subgraph_svd_struct_dim = 100 # subgraph SVD structure dimension

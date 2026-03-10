@@ -265,7 +265,6 @@ def _run_prepare_stage(
         induced_max_size=getattr(ds_cfg, "induced_max_size", 30),
         induced_max_hops=getattr(ds_cfg, "induced_max_hops", 5),
         induced_root=getattr(ds_cfg, "induced_root", ""),
-        force_reload_raw=getattr(ds_cfg, "force_reload_raw", False),
         subgraph_svd=getattr(ds_cfg, "subgraph_svd", True),
         subgraph_svd_feat_dim=getattr(ds_cfg, "subgraph_svd_feat_dim", 100),
         subgraph_svd_struct_dim=getattr(ds_cfg, "subgraph_svd_struct_dim", 100),

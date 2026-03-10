@@ -119,7 +119,6 @@ class FinetuneRunner:
             split=self.split,
             seed=self.cfg.seed,
             split_root=_shared_split_root(self.cfg),
-            force_reload_raw=target_ds.get("force_reload_raw", False),
         )
         effective_task_level = "graph" if induced else raw_task_level
         target_cfg = self.cfg.finetune.dataset
@@ -263,7 +262,6 @@ class FinetuneRunner:
         induced_min_size = getattr(target_cfg, "induced_min_size", 10)
         induced_max_size = getattr(target_cfg, "induced_max_size", 30)
         induced_max_hops = getattr(target_cfg, "induced_max_hops", 5)
-        force_reload_raw = getattr(target_cfg, "force_reload_raw", False)
 
         method_name = (
             str(getattr(finetune_cfg, "method", "supervised") or "supervised")
@@ -293,9 +291,6 @@ class FinetuneRunner:
                     f"hops={induced_max_hops}, min_size={induced_min_size}, max_size={induced_max_size}."
                 )
 
-        if force_reload_raw:
-            feat_reduction = False
-            feat_reduction_dim = 0
         return {
             "name": name,
             "task_level": task_level,
@@ -310,7 +305,6 @@ class FinetuneRunner:
             "induced_min_size": induced_min_size,
             "induced_max_size": induced_max_size,
             "induced_max_hops": induced_max_hops,
-            "force_reload_raw": force_reload_raw,
         }
 
     def _init_monitoring(self) -> None:
