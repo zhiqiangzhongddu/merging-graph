@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name "pt_zinc15"
+#SBATCH --job-name "pt_zinc"
 #SBATCH --time=2-00:00:00       # time (D-HH:MM:SS)
 #SBATCH --account=p201211       # project account
 #SBATCH --nodes=1               # reserve a single GPU node
@@ -41,7 +41,7 @@ if srun ${SRUN_EXTRA_ARGS} --ntasks=4 --kill-on-bad-exit=1 bash <<'SRUN_SCRIPT'
 set -euo pipefail
 
 METHODS=(edge_pred edge_pred context_pred context_pred)
-BATCH_SIZES=(512 2048 512 2048)
+BATCH_SIZES=(256 512 256 512)
 
 TASK_ID="${SLURM_PROCID:-0}"
 TOTAL_TASKS="${SLURM_NTASKS:-4}"
@@ -62,7 +62,7 @@ log "Starting zinc15 pretraining method=${METHOD} batch_size=${BATCH_SIZE}"
 # Each task sees only its assigned GPU, so the local CUDA index is always 0.
 python "${ROOT_DIR}/run_pretrain.py" \
   model.name gin \
-  pretrain.dataset.name zinc15 \
+  pretrain.dataset.name zinc \
   pretrain.dataset.task_level graph \
   pretrain.dataset.feat_reduction False \
   pretrain.dataset.induced False \

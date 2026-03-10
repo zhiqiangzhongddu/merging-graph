@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name "pretrain_by_dataset"
+#SBATCH --job-name "pt"
 #SBATCH --time=2-00:00:00       # time (D-HH:MM:SS)
 #SBATCH --account=p201211       # project account
 #SBATCH --nodes=1               # 1 node per dataset

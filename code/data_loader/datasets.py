@@ -1483,8 +1483,7 @@ def _load_graph_dataset(
     elif key in ZINC15_NAMES:
         return ZINC15Dataset(root=root, transform=transform)
     elif key in ZINC_NAMES:
-        subset = bool(ZINC_NAMES[key])
-        return ZINC(_scoped_root(root, "zinc"), subset=subset, split="train", transform=transform)
+        return ZINC(_scoped_root(root, "zinc"), subset=False, split="train", transform=transform)
     elif key in TUDataset_NAMES:
         dataset_key = TUDataset_NAMES[key]
         # Ensure nested raw dir exists to avoid fs.ls errors when download checks for files
@@ -2167,10 +2166,9 @@ def make_loaders(
             shuffle=True,
             drop_last=drop_last_train,
         )
-        subset = bool(ZINC_NAMES[raw_dataset_name.lower()])
         train_ds = dataset
-        val_ds = ZINC(dataset.root, subset=subset, split="val", transform=dataset.transform)
-        test_ds = ZINC(dataset.root, subset=subset, split="test", transform=dataset.transform)
+        val_ds = ZINC(dataset.root, subset=False, split="val", transform=dataset.transform)
+        test_ds = ZINC(dataset.root, subset=False, split="test", transform=dataset.transform)
         train_loader = DataLoader(train_ds, **loader_kwargs)
         val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
         test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
