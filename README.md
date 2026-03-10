@@ -134,11 +134,15 @@ Run a single pre-training job from the project root:
 ```bash
 # attr_masking / context_pred / dgi / edge_pred / graphcl / infograph
 python run_pretrain.py \
-  model.name gcn \
-  pretrain.dataset.name cora \
-  pretrain.dataset.task_level node \
-  pretrain.dataset.induced True \
+  model.name gin \
+  pretrain.dataset.name zinc15 \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.feat_reduction False \
+  pretrain.dataset.induced False \
   pretrain.method edge_pred \
+  pretrain.epochs 100 \
+  pretrain.early_stopping 100 \
+  pretrain.batch_size 512 \
   device 0
 
 # supervised
