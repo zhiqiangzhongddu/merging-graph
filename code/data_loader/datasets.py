@@ -1119,18 +1119,26 @@ class EnsureFeatureTransform:
 
     def __call__(self, data: Data) -> Data:
         x = getattr(data, "x", None)
-        if x is None or (hasattr(x, "numel") and x.numel() == 0):
-            num_nodes = data.num_nodes
-            if num_nodes is None:
-                raise ValueError("Cannot infer num_nodes to build degree features.")
-            edge_index = getattr(data, "edge_index", None)
-            if edge_index is not None and edge_index.numel() > 0:
-                deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
-            else:
-                deg = torch.zeros(num_nodes, dtype=torch.float)
-            # Use scalar degree as node feature (num_nodes x 1), avoid huge diagonal matrices.
-            data.x = deg.view(num_nodes, 1)
-            #data.x = torch.diag(deg.view(-1))
+        if x is not None:
+            if torch.is_tensor(x) and x.dim() == 2 and x.size(-1) > 0:
+                # Preserve the original feature schema for empty graphs. PyG SMILES
+                # parsing can emit zero-node molecules as shape [0, num_features];
+                # replacing them with degree features changes the batch feature width.
+                return data
+            if hasattr(x, "numel") and x.numel() > 0:
+                return data
+
+        num_nodes = data.num_nodes
+        if num_nodes is None:
+            raise ValueError("Cannot infer num_nodes to build degree features.")
+        edge_index = getattr(data, "edge_index", None)
+        if edge_index is not None and edge_index.numel() > 0:
+            deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
+        else:
+            deg = torch.zeros(num_nodes, dtype=torch.float)
+        # Use scalar degree as node feature (num_nodes x 1), avoid huge diagonal matrices.
+        data.x = deg.view(num_nodes, 1)
+        #data.x = torch.diag(deg.view(-1))
         return data
 
 
