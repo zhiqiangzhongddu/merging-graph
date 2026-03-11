@@ -1,11 +1,11 @@
-# Graph Model Merging
+# AnyGraphAnyExpert
 
 ## Environment set up
 
 ```bash
 # create a new environment
-conda create -n merging-graph -y python=3.10
-conda activate merging-graph
+conda create -n agae -y python=3.10
+conda activate agae
 
 # install pytorch
 pip install torch==2.1.1 --index-url https://download.pytorch.org/whl/cu118
@@ -29,18 +29,13 @@ pip install torch-cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.1.1+cu118.h
 - Default dataset root: `data/datasets` (override with `data_preparation.dataset.root`).
 - Node- and edge-level dataset list: `data/available_node_datasets.tsv`.
 - Graph-level dataset list: `data/available_graph_datasets.tsv`.
-- Total available datasets: `50`.
+- Total available datasets: `72`.
 - `run_data_preparation.py` handles download, preprocessing, split generation, feature SVD, induced subgraphs, and subgraph SVD (based on config). It also generates a dataset summary at `data/data_summary.tsv` for the datasets prepared in that run.
-- If `data_preparation.target_datasets` is empty, both TSV lists are prepared automatically.
 
 ```bash
-# prepare selected datasets (task level inferred from dataset registry)
+# prepare selected datasets
 python run_data_preparation.py \
-  data_preparation.target_datasets "[cora,actor]"
-
-# prepare selected graph datasets
-python run_data_preparation.py \
-  data_preparation.target_datasets "[bace,bbbp]"
+  data_preparation.target_datasets "actor,bace,cora,ogbn-arxiv,ogbn-products,qm7b,zinc,zinc15"
 
 # prepare all available node/edge datasets
 python run_data_preparation.py \
@@ -49,9 +44,6 @@ python run_data_preparation.py \
 # prepare all available graph datasets
 python run_data_preparation.py \
   data_preparation.target_datasets data/available_graph_datasets.tsv
-
-# prepare all available datasets (both TSV files)
-python run_data_preparation.py
 
 # HPC execution (array job, one dataset per task)
 sbatch slurm/run_all_data_preparation.slurm
@@ -155,60 +147,6 @@ python run_pretrain.py \
 Submit an HPC job for large-scale pre-training:
 ```bash
 sbatch slurm/run_all_pretrain.slurm
-```
-
-Pretraining on specific large datasets:
-```bash
-# zinc15
-python run_pretrain.py \
-  model.name gin \
-  pretrain.dataset.name zinc15 \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
-  pretrain.dataset.induced False \
-  pretrain.method edge_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 512 \
-  device 0
-
-python run_pretrain.py \
-  model.name gin \
-  pretrain.dataset.name zinc15 \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
-  pretrain.dataset.induced False \
-  pretrain.method edge_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 2048 \
-  device 1
-
-python run_pretrain.py \
-  model.name gin \
-  pretrain.dataset.name zinc15 \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
-  pretrain.dataset.induced False \
-  pretrain.method context_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 512 \
-  device 2
-
-python run_pretrain.py \
-  model.name gin \
-  pretrain.dataset.name zinc15 \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
-  pretrain.dataset.induced False \
-  pretrain.method context_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 2048 \
-  device 3
-
-sbatch slurm/run_pretrain_zinc15.slurm
 ```
 
 ## Fine-tuning

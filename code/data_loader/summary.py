@@ -294,21 +294,16 @@ def _merge_summary_rows(
     new_rows: Sequence[DatasetSummaryRow],
 ) -> List[DatasetSummaryRow]:
     merged_by_key = {}
-    ordered_keys: List[Tuple[str, str]] = []
 
     for row in existing_rows:
         key = _summary_row_key(row)
-        if key not in merged_by_key:
-            ordered_keys.append(key)
         merged_by_key[key] = row
 
     for row in new_rows:
         key = _summary_row_key(row)
-        if key not in merged_by_key:
-            ordered_keys.append(key)
         merged_by_key[key] = row
 
-    return [merged_by_key[key] for key in ordered_keys]
+    return sorted(merged_by_key.values(), key=_summary_row_key)
 
 
 def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> int:
