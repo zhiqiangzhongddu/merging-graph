@@ -8,7 +8,7 @@
 #SBATCH --gpus=1                # one GPU per dataset
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --array=0-49            # 38 node/edge datasets + 12 graph datasets
+#SBATCH --array=0-70            # 39 node/edge datasets + 32 graph datasets
 #SBATCH --qos default
 #SBATCH --output=slurm/output/%x-%A_%a.out
 #SBATCH --error=slurm/output/%x-%A_%a.err
