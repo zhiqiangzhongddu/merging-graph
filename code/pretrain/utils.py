@@ -124,7 +124,7 @@ def run_pretrain_tasks(cfg) -> int:
             results.append(True)
         except Exception as exc:
             print(
-                f"[Pretrain] Failed {task['dataset']} ({task['task_level']}, induced={task['induced']}) "
+                f"[Pretrain] Failed {task['dataset']} (task level={task['task_level']}, induced={task['induced']}) "
                 f"{task['method']} seed={seed_value}: {exc}"
             )
             results.append(False)

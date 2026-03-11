@@ -63,10 +63,8 @@ class FinetuneGPPT(FinetuneTask):
         )
         self.freeze_encoder_effective = bool(method_force_freeze)
         self._encoder_frozen_notice_printed = False
-        concat_neighbor = self._to_bool(getattr(method_cfg, "concat_neighbor", True)) if method_cfg is not None else True
         structure_mode = str(getattr(method_cfg, "structure_mode", "concat")) if method_cfg is not None else "concat"
-        task_mode_default = "concat" if concat_neighbor else "neighbor"
-        task_mode = str(getattr(method_cfg, "task_mode", task_mode_default)) if method_cfg is not None else task_mode_default
+        task_mode = str(getattr(method_cfg, "task_mode", "concat")) if method_cfg is not None else "concat"
 
         self.prompt = GPPTPrompt(
             in_channels=self.repr_dim,

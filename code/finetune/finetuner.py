@@ -571,7 +571,7 @@ class FinetuneRunner:
         if method == "graphprompt":
             gp_cfg = getattr(finetune_cfg, "graphprompt", None)
             plus = int(bool(getattr(gp_cfg, "plus", False))) if gp_cfg is not None else 0
-            score_mode = str(getattr(gp_cfg, "score_mode", "neg_distance") or "neg_distance").lower()
+            score_mode = str(getattr(gp_cfg, "score_mode", "auto") or "auto").lower()
             return f"plus{plus}_{score_mode}"
         return ""
 
@@ -627,10 +627,6 @@ class FinetuneRunner:
                 else:
                     update_flag = bool(raw_update_pretrained)
                 tags.append(f"upd{int(update_flag)}")
-
-            optimizer_name = str(getattr(gpf_cfg, "optimizer", "adam") or "adam").lower()
-            if optimizer_name != "adam":
-                tags.append(optimizer_name)
 
             monitor_train_loss = bool(getattr(gpf_cfg, "monitor_train_loss", False))
             if monitor_train_loss:

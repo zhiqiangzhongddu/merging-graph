@@ -1,9 +1,11 @@
 """
 NodeFormer implementation vendored from https://github.com/qitianwu/NodeFormer (commit main),
-with a thin encoder wrapper that returns (node_repr, graph_repr) to match the project interface.
+with a thin encoder wrapper that returns
+(node_repr, graph_repr) to match the project interface.
 """
 import math
-from typing import Callable, Optional, Tuple
+import os
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -181,7 +183,7 @@ def kernelized_gumbel_softmax(query, key, value, kernel_transformation, projecti
     key_prime = key_prime.permute(1, 0, 2, 3)  # [N, B, H, M]
     value = value.permute(1, 0, 2, 3)  # [N, B, H, D]
 
-    gumbels = -torch.empty(key_prime.shape[:-1] + (K,), device=query.device).exponential_().log() / tau  # [N, B, H, K]
+    gumbels = (-torch.empty(key_prime.shape[:-1] + (K,)).exponential_().log()).to(query.device) / tau  # [N, B, H, K]
     key_t_gumbel = key_prime.unsqueeze(3) * gumbels.exp().unsqueeze(4)  # [N, B, H, K, M]
     z_num = numerator_gumbel(query_prime, key_t_gumbel, value)  # [N, B, H, K, D]
     z_den = denominator_gumbel(query_prime, key_t_gumbel)  # [N, B, H, K]

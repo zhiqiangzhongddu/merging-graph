@@ -1,13 +1,14 @@
 import csv
 import hashlib
+import contextlib
 from numbers import Integral
-from urllib.request import urlretrieve
-from zipfile import ZipFile
+import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
-import contextlib
 import re
+from urllib.request import urlretrieve
 import warnings
+from zipfile import ZipFile
 
 import torch
 from torch.utils.data import Dataset, Subset
@@ -31,7 +32,7 @@ from torch_geometric.datasets import (
     HeterophilousGraphDataset,
     # LastFMAsia,
     LINKXDataset,
-    LRGBDataset,
+    # LRGBDataset,
     MoleculeNet,
     Planetoid,
     QM7b,
@@ -64,9 +65,13 @@ warnings.filterwarnings(
     category=UserWarning,
     module="torch_geometric.data.in_memory_dataset",
 )
+warnings.filterwarnings(
+    "ignore",
+    message="Sparse CSR tensor support is in beta state.*",
+    category=UserWarning,
+)
 
 # Ensure torch.load works with PyG Data under torch 2.6+ defaults.
-import os
 import torch.serialization as ts  # type: ignore
 
 os.environ.setdefault("TORCH_LOAD_WEIGHTS_ONLY", "0")
@@ -199,17 +204,17 @@ LINKXDataset_NAMES = {
     "penn94",
     "reed98",
 }
-LRGB_NODE_NAMES = {
-    "coco-sp": "COCO-SP",
-    "pascalvoc-sp": "PascalVOC-SP",
-}
-LRGB_EDGE_NAMES = {
-    "pcqm-contact": "PCQM-Contact",
-}
-LRGB_GRAPH_NAMES = {
-    "peptides-func": "Peptides-func",
-    "peptides-struct": "Peptides-struct",
-}
+# LRGB_NODE_NAMES = {
+#     "coco-sp": "COCO-SP",
+#     "pascalvoc-sp": "PascalVOC-SP",
+# }
+# LRGB_EDGE_NAMES = {
+#     "pcqm-contact": "PCQM-Contact",
+# }
+# LRGB_GRAPH_NAMES = {
+#     "peptides-func": "Peptides-func",
+#     "peptides-struct": "Peptides-struct",
+# }
 Planetoid_NAMES = {
     "citeseer": "CiteSeer",
     "cora": "Cora",
@@ -246,8 +251,6 @@ MoleculeNet_NAMES = {
 }
 QM7b_NAMES = {"qm7b"}
 QM9_NAMES = {"qm9"}
-ZINC_NAMES = {"zinc"}
-ZINC15_NAMES = {"zinc15"}
 TUDataset_NAMES = {
     "collab": "COLLAB",
     "enzymes": "ENZYMES",
@@ -266,11 +269,14 @@ GNNBenchmarkDataset_NAMES = {
     "mnist": "MNIST",
     "cifar10": "CIFAR10",
 }
+ZINC_NAMES = {"zinc"}
+ZINC15_NAMES = {"zinc15"}
 
 
 def _is_node_dataset_key(key: str) -> bool:
     return (
-        key in Actor_NAMES
+        key.startswith("ogbn-")
+        or key in Actor_NAMES
         or key in Airports_NAMES
         or key in Amazon_NAMES
         or key in CitationFull_NAMES
@@ -281,11 +287,10 @@ def _is_node_dataset_key(key: str) -> bool:
         or key in Flickr_NAMES
         or key in HeterophilousGraphDataset_NAMES
         or key in LINKXDataset_NAMES
-        or key in LRGB_NODE_NAMES
+        # or key in LRGB_NODE_NAMES
         or key in Planetoid_NAMES
         or key in Reddit_NAMES
         or key in Reddit2_NAMES
-        or key.startswith("ogbn-")
         or key in WebKB_NAMES
         or key in WikiCS_NAMES
         or key in WikipediaNetwork_NAMES
@@ -294,20 +299,23 @@ def _is_node_dataset_key(key: str) -> bool:
 
 def _is_graph_dataset_key(key: str) -> bool:
     return (
-        key in MoleculeNet_NAMES
+        key.startswith("ogbg-")
+        or key in MoleculeNet_NAMES
         or key in GNNBenchmarkDataset_NAMES
-        or key in LRGB_GRAPH_NAMES
+        # or key in LRGB_GRAPH_NAMES
+        or key in ZINC_NAMES
         or key in QM7b_NAMES
         or key in QM9_NAMES
-        or key in ZINC_NAMES
-        or key in ZINC15_NAMES
         or key in TUDataset_NAMES
-        or key.startswith("ogbg-")
+        or key in ZINC15_NAMES
     )
 
 
 def _is_edge_dataset_key(key: str) -> bool:
-    return key in LRGB_EDGE_NAMES or key.startswith("ogbl-")
+    return (
+        key.startswith("ogbl-")
+        # or key in LRGB_EDGE_NAMES
+    )
 
 
 def infer_task_level(name: str) -> str | None:
@@ -480,6 +488,12 @@ def _few_shot_suffix(shots: int, val_ratio: float, test_ratio: float) -> str:
     return f"fewshot{shots}-{val_pct}-{test_pct}"
 
 
+def _count_split_suffix(train_count: int, val_ratio: float, test_ratio: float) -> str:
+    val_pct = int(round(val_ratio * 100))
+    test_pct = int(round(test_ratio * 100))
+    return f"count{int(train_count)}-{val_pct}-{test_pct}"
+
+
 def _labels_indicate_regression(labels: torch.Tensor) -> bool:
     """Best-effort regression detection from labels."""
     label_tensor = torch.as_tensor(labels).view(-1)
@@ -501,6 +515,105 @@ def _labels_indicate_regression(labels: torch.Tensor) -> bool:
     return False
 
 
+def _safe_dataset_num_classes(dataset) -> int | None:
+    """Read dataset.num_classes without surfacing PyG's float-label warning."""
+    raw_num_classes = getattr(dataset, "__dict__", {}).get("num_classes", None)
+    try:
+        if raw_num_classes is not None:
+            return int(raw_num_classes)
+    except Exception:
+        pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.filterwarnings(
+            "always",
+            message="Found floating-point labels while calling `dataset.num_classes`.*",
+            category=UserWarning,
+        )
+        try:
+            num_classes = getattr(dataset, "num_classes", None)
+        except Exception:
+            return None
+
+    for caught_warning in caught:
+        if "Found floating-point labels while calling `dataset.num_classes`" in str(caught_warning.message):
+            return None
+
+    try:
+        return int(num_classes) if num_classes is not None else None
+    except Exception:
+        return None
+
+
+def _extract_task_labels(dataset, task_level: str, max_graphs: int = 4096) -> torch.Tensor | None:
+    """Best-effort label extraction for node/graph datasets."""
+    if getattr(dataset, "has_labels", None) is False:
+        return None
+
+    level = str(task_level).lower()
+    if level == "node":
+        try:
+            data = dataset[0]
+        except Exception:
+            return None
+        labels = getattr(data, "y", None)
+        return torch.as_tensor(labels) if labels is not None else None
+
+    if level != "graph":
+        return None
+
+    data_obj = _get_dataset_data_storage(dataset)
+    labels = getattr(data_obj, "y", None) if data_obj is not None else None
+    if labels is not None:
+        labels_tensor = torch.as_tensor(labels)
+        try:
+            if labels_tensor.dim() == 0 or labels_tensor.size(0) == len(dataset):
+                return labels_tensor
+        except Exception:
+            if labels_tensor.dim() == 0:
+                return labels_tensor
+
+    collected = []
+    target_dim = None
+    try:
+        sample_count = min(int(len(dataset)), int(max_graphs))
+        for idx in range(sample_count):
+            item = dataset[idx]
+            y = getattr(item, "y", None)
+            if y is None:
+                continue
+            y_tensor = torch.as_tensor(y).detach().cpu().view(-1)
+            if y_tensor.numel() == 0:
+                continue
+            if target_dim is None:
+                target_dim = int(y_tensor.numel())
+            if int(y_tensor.numel()) != target_dim:
+                return torch.cat(collected + [y_tensor], dim=0) if collected else y_tensor
+            collected.append(y_tensor)
+    except Exception:
+        return None
+
+    if not collected:
+        return None
+    return torch.stack(collected, dim=0)
+
+
+def _label_target_dim(labels: torch.Tensor | None) -> int:
+    """Return the number of target values per node/graph item."""
+    if labels is None:
+        return 0
+    label_tensor = torch.as_tensor(labels)
+    if label_tensor.numel() == 0:
+        return 0
+    if label_tensor.dim() <= 1:
+        return 1
+
+    dim = 1
+    for size in label_tensor.shape[1:]:
+        dim *= int(size)
+    return dim
+
+
 def is_regression_dataset(dataset, task_level: str) -> bool:
     """
     Infer whether the current task uses regression labels.
@@ -510,60 +623,51 @@ def is_regression_dataset(dataset, task_level: str) -> bool:
     level = str(task_level).lower()
     if level == "edge":
         return False
-    if getattr(dataset, "has_labels", True) is False:
+    if getattr(dataset, "has_labels", None) is False:
         return False
 
+    labels = _extract_task_labels(dataset, level)
+    if labels is not None:
+        label_tensor = torch.as_tensor(labels)
+        if label_tensor.dtype.is_floating_point:
+            finite = label_tensor[torch.isfinite(label_tensor)]
+            if finite.numel() > 0 and not torch.allclose(finite, finite.round(), atol=1e-6):
+                return True
+
     # Explicit class count indicates classification.
-    num_classes = getattr(dataset, "num_classes", None)
-    try:
-        if num_classes is not None and int(num_classes) > 0:
-            return False
-    except Exception:
-        pass
+    num_classes = _safe_dataset_num_classes(dataset)
+    if num_classes is not None and num_classes > 0:
+        return False
 
-    if level == "node":
-        try:
-            data = dataset[0]
-            labels = getattr(data, "y", None)
-            if labels is None:
-                return False
-            return _labels_indicate_regression(labels)
-        except Exception:
-            return False
-
-    if level == "graph":
-        # Fast path for in-memory graph labels.
-        data_obj = _get_dataset_data_storage(dataset)
-        labels = getattr(data_obj, "y", None) if data_obj is not None else None
-        if labels is not None:
-            labels_tensor = torch.as_tensor(labels).view(-1)
-            try:
-                if labels_tensor.numel() == len(dataset):
-                    return _labels_indicate_regression(labels_tensor)
-            except Exception:
-                pass
-
-        # Fallback: sample per-graph labels.
-        sampled = []
-        try:
-            sample_count = min(len(dataset), 4096)
-            for idx in range(sample_count):
-                item = dataset[idx]
-                y = getattr(item, "y", None)
-                if y is None:
-                    continue
-                y_tensor = torch.as_tensor(y).view(-1)
-                if y_tensor.numel() > 0:
-                    sampled.append(y_tensor[0].detach().cpu())
-        except Exception:
-            sampled = []
-
-        if not sampled:
-            return False
-        stacked = torch.stack(sampled).view(-1)
-        return _labels_indicate_regression(stacked)
+    if labels is not None:
+        return _labels_indicate_regression(labels)
 
     return False
+
+
+def resolve_count_split_strategy(dataset, task_level: str) -> str:
+    """
+    Decide how integer-first split definitions should be interpreted.
+
+    Returns:
+      - "balanced": single-label classification few-shot
+      - "random": multi-target labels -> random train-count split
+      - "unsupported": unlabeled or single-target regression
+    """
+    level = str(task_level).lower()
+    if level == "edge":
+        return "unsupported"
+    if getattr(dataset, "has_labels", None) is False:
+        return "unsupported"
+
+    labels = _extract_task_labels(dataset, level)
+    if labels is None or torch.as_tensor(labels).numel() == 0:
+        return "unsupported"
+    if _label_target_dim(labels) > 1:
+        return "random"
+    if is_regression_dataset(dataset, level):
+        return "unsupported"
+    return "balanced"
 
 
 def _load_existing_indices(path: Path, expected_total: int):
@@ -954,6 +1058,100 @@ class SingleGraphDataLoader:
         return 1
 
 
+def _build_reverse_csr(edge_index: torch.Tensor, num_nodes: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build a compact inbound adjacency index for bounded node-induced expansion."""
+    if edge_index is None or edge_index.numel() == 0 or num_nodes <= 0:
+        return (
+            torch.zeros(max(num_nodes, 0) + 1, dtype=torch.long),
+            torch.empty(0, dtype=torch.long),
+        )
+
+    reverse_edge_index = edge_index[[1, 0]].detach().cpu()
+    values = torch.ones(reverse_edge_index.size(1), dtype=torch.uint8)
+    reverse_adj = (
+        torch.sparse_coo_tensor(
+            reverse_edge_index,
+            values,
+            size=(num_nodes, num_nodes),
+            device="cpu",
+        )
+        .coalesce()
+        .to_sparse_csr()
+    )
+    return reverse_adj.crow_indices(), reverse_adj.col_indices()
+
+
+def _sample_bounded_k_hop_subset(
+    center_idx: int,
+    reverse_crow: torch.Tensor,
+    reverse_cols: torch.Tensor,
+    smallest_size: int,
+    largest_size: int | None,
+    max_hops: int,
+    start_hops: int,
+) -> torch.Tensor:
+    """Sample a bounded inbound k-hop neighborhood without materializing large frontiers."""
+    min_size = max(1, int(smallest_size))
+    max_size = int(largest_size) if largest_size is not None and int(largest_size) > 0 else None
+    if max_size is not None:
+        min_size = min(min_size, max_size)
+
+    min_hops = max(0, int(start_hops))
+    hop_limit = max(min_hops, int(max_hops))
+    selected = [int(center_idx)]
+    frontier = [int(center_idx)]
+    visited = {int(center_idx)}
+    hop = 0
+
+    while frontier and hop < hop_limit:
+        hop += 1
+        if max_size is not None and len(selected) >= max_size:
+            break
+
+        remaining_slots = (max_size - len(selected)) if max_size is not None else max(min_size - len(selected), 1)
+        if remaining_slots <= 0:
+            break
+
+        per_frontier_budget = max(1, (remaining_slots + len(frontier) - 1) // max(len(frontier), 1))
+        sample_budget = max(per_frontier_budget * 2, min(remaining_slots, 32))
+        next_frontier: List[int] = []
+
+        for node_id in frontier:
+            start = int(reverse_crow[node_id].item())
+            end = int(reverse_crow[node_id + 1].item())
+            degree = end - start
+            if degree <= 0:
+                continue
+
+            neighbors = reverse_cols[start:end]
+            if degree > sample_budget:
+                choice = torch.randperm(degree)[:sample_budget]
+                neighbors = neighbors[choice]
+
+            for neighbor in neighbors.tolist():
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                next_frontier.append(int(neighbor))
+                if len(selected) + len(next_frontier) >= (max_size or (len(selected) + remaining_slots)):
+                    break
+            if len(selected) + len(next_frontier) >= (max_size or (len(selected) + remaining_slots)):
+                break
+
+        if not next_frontier:
+            break
+
+        if max_size is not None and len(selected) + len(next_frontier) > max_size:
+            next_frontier = next_frontier[: max_size - len(selected)]
+        selected.extend(next_frontier)
+        frontier = next_frontier
+
+        if hop >= min_hops and len(selected) >= min_size:
+            break
+
+    return torch.tensor(selected, dtype=torch.long)
+
+
 def build_induced_graphs(
     data: Data,
     smallest_size: int = 10,
@@ -979,6 +1177,10 @@ def build_induced_graphs(
     labels = labels.view(-1)
     device = data.x.device if getattr(data, "x", None) is not None else torch.device("cpu")
     has_edges = edge_index is not None and edge_index.numel() > 0
+    reverse_crow = reverse_cols = None
+    use_bounded_expansion = has_edges and largest_size is not None and largest_size > 0
+    if use_bounded_expansion:
+        reverse_crow, reverse_cols = _build_reverse_csr(edge_index, int(num_nodes))
 
     for idx in range(num_nodes):
         label = int(labels[idx].item())
@@ -988,6 +1190,17 @@ def build_induced_graphs(
         subset = torch.tensor([idx], device=device)
 
         if has_edges:
+            if use_bounded_expansion and reverse_crow is not None and reverse_cols is not None:
+                subset = _sample_bounded_k_hop_subset(
+                    center_idx=idx,
+                    reverse_crow=reverse_crow,
+                    reverse_cols=reverse_cols,
+                    smallest_size=smallest_size,
+                    largest_size=largest_size,
+                    max_hops=max_hops,
+                    start_hops=start_hops,
+                )
+            else:
                 subset, _, _, _ = k_hop_subgraph(
                     node_idx=idx,
                     num_hops=hops,
@@ -1119,26 +1332,18 @@ class EnsureFeatureTransform:
 
     def __call__(self, data: Data) -> Data:
         x = getattr(data, "x", None)
-        if x is not None:
-            if torch.is_tensor(x) and x.dim() == 2 and x.size(-1) > 0:
-                # Preserve the original feature schema for empty graphs. PyG SMILES
-                # parsing can emit zero-node molecules as shape [0, num_features];
-                # replacing them with degree features changes the batch feature width.
-                return data
-            if hasattr(x, "numel") and x.numel() > 0:
-                return data
-
-        num_nodes = data.num_nodes
-        if num_nodes is None:
-            raise ValueError("Cannot infer num_nodes to build degree features.")
-        edge_index = getattr(data, "edge_index", None)
-        if edge_index is not None and edge_index.numel() > 0:
-            deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
-        else:
-            deg = torch.zeros(num_nodes, dtype=torch.float)
-        # Use scalar degree as node feature (num_nodes x 1), avoid huge diagonal matrices.
-        data.x = deg.view(num_nodes, 1)
-        #data.x = torch.diag(deg.view(-1))
+        if x is None or (hasattr(x, "numel") and x.numel() == 0):
+            num_nodes = data.num_nodes
+            if num_nodes is None:
+                raise ValueError("Cannot infer num_nodes to build degree features.")
+            edge_index = getattr(data, "edge_index", None)
+            if edge_index is not None and edge_index.numel() > 0:
+                deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
+            else:
+                deg = torch.zeros(num_nodes, dtype=torch.float)
+            # Use scalar degree as node feature (num_nodes x 1), avoid huge diagonal matrices.
+            data.x = deg.view(num_nodes, 1)
+            #data.x = torch.diag(deg.view(-1))
         return data
 
 
@@ -1219,6 +1424,7 @@ class InducedGraphDataset(Dataset):
             data.split = self.split_tags[idx]
         return data
 
+
 class ZINC15Dataset(Dataset):
     """Lazy SMILES-backed loader for the 2M-molecule ZINC15 pretraining subset."""
 
@@ -1226,10 +1432,11 @@ class ZINC15Dataset(Dataset):
     expected_md5 = "9126f2aab5f2cd3fccd307616eec6779"
     member_path = "dataset/zinc_standard_agent/processed/smiles.csv"
 
-    def __init__(self, root: str, transform=None, sample_stats_size: int = 2048):
+    def __init__(self, root: str, transform=None, sample_stats_size: int = 2048, name: str = "zinc15"):
         if from_smiles is None:
             raise ImportError("torch_geometric.utils.smiles.from_smiles is required for ZINC15.")
 
+        self.name = str(name).lower()
         self.root = _scoped_root(root, "zinc15")
         self.transform = transform
         self.sample_stats_size = max(1, int(sample_stats_size))
@@ -1247,8 +1454,16 @@ class ZINC15Dataset(Dataset):
         self.num_graphs = int(metadata["num_graphs"])
         self.avg_nodes_per_graph = float(metadata.get("avg_nodes_per_graph", 0.0))
         self.avg_edges_per_graph = float(metadata.get("avg_edges_per_graph", 0.0))
-        self.total_nodes = int(round(self.avg_nodes_per_graph * self.num_graphs)) if self.avg_nodes_per_graph > 0 else None
-        self.total_edges = int(round(self.avg_edges_per_graph * self.num_graphs)) if self.avg_edges_per_graph > 0 else None
+        self.total_nodes = (
+            int(round(self.avg_nodes_per_graph * self.num_graphs))
+            if self.avg_nodes_per_graph > 0
+            else None
+        )
+        self.total_edges = (
+            int(round(self.avg_edges_per_graph * self.num_graphs))
+            if self.avg_edges_per_graph > 0
+            else None
+        )
         self.num_classes = None
         self.has_labels = False
 
@@ -1260,8 +1475,8 @@ class ZINC15Dataset(Dataset):
         if not archive_ready:
             if self.raw_zip_path.is_file():
                 self.raw_zip_path.unlink()
-            print(f"[Dataset] Downloading ZINC15 from {self.url}")
-            urlretrieve(self.url, self.raw_zip_path)
+            print(f"[Dataset] Downloading {self.name} from {self.url}")
+            urlretrieve(self.url, str(self.raw_zip_path))
             if not self._has_required_member(self.raw_zip_path):
                 raise ValueError("Downloaded ZINC15 archive is invalid or missing the expected SMILES file.")
         elif not self._check_md5(self.raw_zip_path, self.expected_md5):
@@ -1387,6 +1602,11 @@ class ZINC15Dataset(Dataset):
             data = self.transform(data)
         return data
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_file_handle"] = None
+        return state
+
     def __del__(self):
         handle = getattr(self, "_file_handle", None)
         if handle is not None and not handle.closed:
@@ -1434,9 +1654,9 @@ def _load_node_dataset(
     #     return LastFMAsia(_scoped_root(root, "LastFMAsia"), transform=transform)
     elif key in LINKXDataset_NAMES:
         return LINKXDataset(_scoped_root(root, key), key, transform=transform)
-    elif key in LRGB_NODE_NAMES or key in LRGB_EDGE_NAMES:
-        dataset_key = LRGB_NODE_NAMES.get(key) or LRGB_EDGE_NAMES[key]
-        return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
+    # elif key in LRGB_NODE_NAMES or key in LRGB_EDGE_NAMES:
+    #     dataset_key = LRGB_NODE_NAMES.get(key) or LRGB_EDGE_NAMES[key]
+    #     return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in Planetoid_NAMES:
         return Planetoid(
             _scoped_root(root, key),
@@ -1480,9 +1700,9 @@ def _load_graph_dataset(
     elif key in GNNBenchmarkDataset_NAMES:
         dataset_key = GNNBenchmarkDataset_NAMES[key]
         return GNNBenchmarkDataset(_scoped_root(root, key), dataset_key, transform=transform)
-    elif key in LRGB_GRAPH_NAMES:
-        dataset_key = LRGB_GRAPH_NAMES[key]
-        return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
+    # elif key in LRGB_GRAPH_NAMES:
+    #     dataset_key = LRGB_GRAPH_NAMES[key]
+    #     return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in QM7b_NAMES:
         return QM7b(_scoped_root(root, key), transform=transform)
     elif key in QM9_NAMES:
@@ -1530,9 +1750,8 @@ def create_dataset(
     """Create dataset based on name and task level with optional feature reduction."""
     transforms = [EnsureFeatureTransform()]
     reducer = None
-    use_inline_feature_reduction = task_level == "graph" and str(name).lower() in (set(ZINC_NAMES) | set(ZINC15_NAMES))
     if feat_reduction:
-        if persist_feature_svd and not use_inline_feature_reduction:
+        if persist_feature_svd:
             reducer = SafeSVDFeatureReduction(out_channels=feat_reduction_dim)
         else:
             transforms.append(SafeSVDFeatureReduction(out_channels=feat_reduction_dim))
@@ -1817,24 +2036,48 @@ def create_dataset(
         dataset = _load_graph_dataset(
             name=name, 
             root=root, 
-            transform=transform
+            transform=transform,
         )
         # Optional one-time SVD cache for graph datasets
-        if reducer and _get_dataset_data_storage(dataset) is not None and persist_feature_svd:
-            _apply_feature_svd(
-                dataset,
-                name,
-                feat_reduction_dim,
-                reducer,
-                task_level=task_level,
-                output_root=feature_svd_dir,
-            )
-            try:
-                dataset._svd_dim = feat_reduction_dim  # type: ignore[attr-defined]
-                dataset._svd_task_level = task_level  # type: ignore[attr-defined]
-                dataset._feature_svd_root = feature_svd_dir or dataset.root  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        if reducer:
+            if _get_dataset_data_storage(dataset) is not None and persist_feature_svd:
+                _apply_feature_svd(
+                    dataset,
+                    name,
+                    feat_reduction_dim,
+                    reducer,
+                    task_level=task_level,
+                    output_root=feature_svd_dir,
+                )
+                try:
+                    dataset._svd_dim = feat_reduction_dim  # type: ignore[attr-defined]
+                    dataset._svd_task_level = task_level  # type: ignore[attr-defined]
+                    dataset._feature_svd_root = feature_svd_dir or dataset.root  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            else:
+                # Lazy / concatenated graph datasets don't expose a single in-memory
+                # feature matrix. Fall back to per-graph transforms so model input
+                # dimensionality still matches the configured SVD target.
+                pending_datasets = [dataset]
+                while pending_datasets:
+                    current_dataset = pending_datasets.pop()
+                    children = getattr(current_dataset, "datasets", None)
+                    if children is not None:
+                        pending_datasets.extend(children)
+                        continue
+                    current_transform = getattr(current_dataset, "transform", None)
+                    try:
+                        current_dataset.transform = (
+                            reducer if current_transform is None else Compose([current_transform, reducer])
+                        )
+                    except Exception:
+                        pass
+                try:
+                    dataset.num_features = int(feat_reduction_dim)  # type: ignore[attr-defined]
+                    dataset.num_node_features = int(feat_reduction_dim)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
         return dataset
 
     else:
@@ -1885,7 +2128,7 @@ def _apply_feature_svd(
         except Exception:
             save_path.unlink(missing_ok=True)
 
-    print(f"[FeatureSVD] Processing features for {name} (task={task_level or 'node'})...")
+    print(f"[FeatureSVD] Processing features for {name} (task level={task_level or 'node'})...")
 
     # Apply reducer once on the aggregated data.
     data = _get_dataset_data_storage(dataset)
@@ -1940,24 +2183,38 @@ def split_graph_dataset(
         use_few_shot = isinstance(first, Integral) and not isinstance(first, bool)
 
     if use_few_shot:
-        labels_list = []
-        for item in dataset:
-            if not hasattr(item, "y") or item.y is None:
-                raise ValueError("Few-shot split requires labels for each graph instance.")
-            target = item.y.view(-1)
-            if target.numel() != 1:
-                raise ValueError("Few-shot split currently supports single-label targets.")
-            labels_list.append(int(target[0].item()))
-        labels = torch.tensor(labels_list, dtype=torch.long)
-        train_idx, val_idx, test_idx = _get_or_create_few_shot_split(
-            dataset_name=split_dataset_name,
-            labels=labels,
-            shots_per_class=int(split[0]),
-            val_ratio=float(split[1]),
-            test_ratio=float(split[2]),
-            seed=seed,
-            split_root_path=split_root_path,
-        )
+        split_strategy = resolve_count_split_strategy(dataset, "graph")
+        if split_strategy == "random":
+            train_idx, val_idx, test_idx = _get_or_create_count_split(
+                dataset_name=split_dataset_name,
+                train_count=int(split[0]),
+                val_ratio=float(split[1]),
+                test_ratio=float(split[2]),
+                seed=seed,
+                split_root_path=split_root_path,
+                total=len(dataset),
+            )
+        elif split_strategy == "balanced":
+            labels_list = []
+            for item in dataset:
+                if not hasattr(item, "y") or item.y is None:
+                    raise ValueError("Few-shot split requires labels for each graph instance.")
+                target = item.y.view(-1)
+                if target.numel() != 1:
+                    raise ValueError("Few-shot split currently supports single-label targets.")
+                labels_list.append(int(target[0].item()))
+            labels = torch.tensor(labels_list, dtype=torch.long)
+            train_idx, val_idx, test_idx = _get_or_create_few_shot_split(
+                dataset_name=split_dataset_name,
+                labels=labels,
+                shots_per_class=int(split[0]),
+                val_ratio=float(split[1]),
+                test_ratio=float(split[2]),
+                seed=seed,
+                split_root_path=split_root_path,
+            )
+        else:
+            raise ValueError("Integer-first splits are not supported for unlabeled or single-target regression graph datasets.")
     else:
         train_idx, val_idx, test_idx = _get_or_create_split_indices(
             dataset_name=split_dataset_name,
@@ -2052,6 +2309,64 @@ def _get_or_create_few_shot_split(
     return train_idx, val_idx, test_idx
 
 
+def _get_or_create_count_split(
+    dataset_name: str,
+    train_count: int,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    split_root_path: Path,
+    total: int | None = None,
+    subset_indices: List[int] | None = None,
+):
+    """Create or load a deterministic random train-count split."""
+    if split_root_path is None:
+        raise ValueError("split_root_path must be provided (configure cfg.dataset.split_root).")
+
+    candidate_indices = list(subset_indices) if subset_indices is not None else list(range(int(total or 0)))
+    expected_total = len(candidate_indices)
+    dataset_split_dir = _split_dataset_dir(split_root_path, dataset_name)
+    split_tag = _count_split_suffix(train_count, val_ratio, test_ratio)
+    split_path = dataset_split_dir / f"{dataset_name}_splits-{split_tag}.pt"
+
+    existing = _load_existing_indices(split_path, expected_total)
+    if existing:
+        train_idx, val_idx, test_idx = existing
+        print(f"[Dataset split] Loaded random count split from {split_path}")
+        return train_idx, val_idx, test_idx
+
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(expected_total, generator=generator).tolist() if expected_total > 0 else []
+    ordered = [candidate_indices[idx] for idx in perm]
+
+    train_take = min(int(train_count), expected_total)
+    train_idx = ordered[:train_take]
+    remaining = ordered[train_take:]
+
+    denom = val_ratio + test_ratio
+    val_fraction = val_ratio / denom if denom > 0 else 0.0
+    val_len = int(val_fraction * len(remaining))
+    val_idx = remaining[:val_len]
+    test_idx = remaining[val_len:]
+
+    ensure_dir(str(dataset_split_dir))
+    payload = {
+        "train": train_idx,
+        "val": val_idx,
+        "test": test_idx,
+        "meta": {
+            "dataset_name": dataset_name,
+            "total": expected_total,
+            "split": (train_count, val_ratio, test_ratio),
+            "seed": seed,
+            "type": "random_count",
+        },
+    }
+    torch.save(payload, split_path)
+    print(f"[Dataset split] Saved random count split to {split_path}")
+    return train_idx, val_idx, test_idx
+
+
 def make_loaders(
     dataset,
     dataset_name: str,
@@ -2120,60 +2435,60 @@ def make_loaders(
             split_root_path=split_root_path,
         )
 
+    def _count_indices_from_graphs():
+        if len(split) < 3:
+            raise ValueError("Integer-first split must provide [train_count, val_ratio, test_ratio].")
+        split_root_path = Path(split_root) if split_root else None
+        return _get_or_create_count_split(
+            dataset_name=split_dataset_name,
+            train_count=int(split[0]),
+            val_ratio=float(split[1]),
+            test_ratio=float(split[2]),
+            seed=seed,
+            split_root_path=split_root_path,
+            total=len(dataset),
+        )
+
     use_few_shot = _is_few_shot_split(split)
-    if use_few_shot and is_regression_dataset(dataset, task_level):
-        raise ValueError("Few-shot split is not supported for regression tasks.")
+    split_strategy = resolve_count_split_strategy(dataset, task_level) if use_few_shot else "ratios"
+    if use_few_shot and split_strategy == "unsupported":
+        raise ValueError("Integer-first splits are not supported for unlabeled or single-target regression datasets.")
 
-    # LRGB PascalVOC-SP / COCO-SP are multi-graph node tasks with built-in train/val/test splits.
-    if task_level == "node" and not induced and isinstance(dataset, LRGBDataset) and raw_dataset_name.lower() in LRGB_NODE_NAMES:
-        loader_kwargs = dict(
-            batch_size=batch_size,
-            num_workers=num_workers,
-            shuffle=True,
-            drop_last=drop_last_train,
-        )
-        train_ds = dataset  # already loaded (train split)
-        val_ds = LRGBDataset(dataset.root, dataset.name, split="val", transform=dataset.transform)
-        test_ds = LRGBDataset(dataset.root, dataset.name, split="test", transform=dataset.transform)
+    # # LRGB PascalVOC-SP / COCO-SP are multi-graph node tasks with built-in train/val/test splits.
+    # if task_level == "node" and not induced and isinstance(dataset, LRGBDataset) and raw_dataset_name.lower() in LRGB_NODE_NAMES:
+    #     loader_kwargs = dict(
+    #         batch_size=batch_size,
+    #         num_workers=num_workers,
+    #         shuffle=True,
+    #         drop_last=drop_last_train,
+    #     )
+    #     train_ds = dataset  # already loaded (train split)
+    #     val_ds = LRGBDataset(dataset.root, dataset.name, split="val", transform=dataset.transform)
+    #     test_ds = LRGBDataset(dataset.root, dataset.name, split="test", transform=dataset.transform)
 
-        # Reuse persisted SVD reduction if it was applied during dataset creation.
-        svd_dim = getattr(dataset, "_svd_dim", None)
-        svd_task = getattr(dataset, "_svd_task_level", None)
-        feature_svd_root = getattr(dataset, "_feature_svd_root", None)
-        if svd_dim and svd_task == "node":
-            reducer = SafeSVDFeatureReduction(out_channels=svd_dim)
-            for ds in (train_ds, val_ds, test_ds):
-                try:
-                    _apply_feature_svd(
-                        ds,
-                        raw_dataset_name,
-                        svd_dim,
-                        reducer,
-                        task_level="node",
-                        output_root=feature_svd_root,
-                    )
-                except Exception:
-                    pass
+    #     # Reuse persisted SVD reduction if it was applied during dataset creation.
+    #     svd_dim = getattr(dataset, "_svd_dim", None)
+    #     svd_task = getattr(dataset, "_svd_task_level", None)
+    #     feature_svd_root = getattr(dataset, "_feature_svd_root", None)
+    #     if svd_dim and svd_task == "node":
+    #         reducer = SafeSVDFeatureReduction(out_channels=svd_dim)
+    #         for ds in (train_ds, val_ds, test_ds):
+    #             try:
+    #                 _apply_feature_svd(
+    #                     ds,
+    #                     raw_dataset_name,
+    #                     svd_dim,
+    #                     reducer,
+    #                     task_level="node",
+    #                     output_root=feature_svd_root,
+    #                 )
+    #             except Exception:
+    #                 pass
 
-        train_loader = DataLoader(train_ds, **loader_kwargs)
-        val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
-        test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
-        return train_loader, val_loader, test_loader
-
-    if task_level == "graph" and not induced and isinstance(dataset, ZINC) and raw_dataset_name.lower() in ZINC_NAMES:
-        loader_kwargs = dict(
-            batch_size=batch_size,
-            num_workers=num_workers,
-            shuffle=True,
-            drop_last=drop_last_train,
-        )
-        train_ds = dataset
-        val_ds = ZINC(dataset.root, subset=False, split="val", transform=dataset.transform)
-        test_ds = ZINC(dataset.root, subset=False, split="test", transform=dataset.transform)
-        train_loader = DataLoader(train_ds, **loader_kwargs)
-        val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
-        test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
-        return train_loader, val_loader, test_loader
+    #     train_loader = DataLoader(train_ds, **loader_kwargs)
+    #     val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+    #     test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+    #     return train_loader, val_loader, test_loader
 
     if task_level == "node" and not induced:
         data = dataset[0]
@@ -2183,9 +2498,18 @@ def make_loaders(
         labels = getattr(data, "y", None)
         labeled_idx = None
         if labels is not None:
-            labels = labels.view(-1)
-            labeled_idx = torch.nonzero(labels >= 0, as_tuple=False).view(-1).tolist()
-        if use_few_shot:
+            label_tensor = torch.as_tensor(labels)
+            if label_tensor.dim() <= 1:
+                label_matrix = label_tensor.view(-1, 1)
+            else:
+                label_matrix = label_tensor.view(label_tensor.size(0), -1)
+            valid_mask = torch.ones_like(label_matrix, dtype=torch.bool)
+            if label_matrix.dtype.is_floating_point:
+                valid_mask &= torch.isfinite(label_matrix)
+            if label_matrix.dtype != torch.bool:
+                valid_mask &= label_matrix >= 0
+            labeled_idx = torch.nonzero(valid_mask.any(dim=1), as_tuple=False).view(-1).tolist()
+        if use_few_shot and split_strategy == "balanced":
             if len(split) < 3:
                 raise ValueError("Few-shot split must provide [shots_per_class, val_ratio, test_ratio].")
             train_idx, val_idx, test_idx = _get_or_create_few_shot_split(
@@ -2196,6 +2520,17 @@ def make_loaders(
                 test_ratio=float(split[2]),
                 seed=seed,
                 split_root_path=split_root_path,
+            )
+        elif use_few_shot and split_strategy == "random":
+            train_idx, val_idx, test_idx = _get_or_create_count_split(
+                dataset_name=split_dataset_name,
+                train_count=int(split[0]),
+                val_ratio=float(split[1]),
+                test_ratio=float(split[2]),
+                seed=seed,
+                split_root_path=split_root_path,
+                total=data.num_nodes,
+                subset_indices=labeled_idx if labeled_idx is not None and len(labeled_idx) < data.num_nodes else None,
             )
         else:
             if labeled_idx is not None and len(labeled_idx) < data.num_nodes:
@@ -2292,6 +2627,8 @@ def make_loaders(
         edge_cfg = edge_pred_cfg
         use_neighbor_sampling = bool(getattr(edge_cfg, "use_neighbor_sampling", False)) if edge_cfg else False
         if use_neighbor_sampling:
+            if LinkNeighborLoader is None:
+                raise ImportError("LinkNeighborLoader is required for neighbor sampling.")
             sizes = list(getattr(edge_cfg, "neighbor_sizes", [15, 10]))
             edge_batch_size = int(getattr(edge_cfg, "edge_batch_size", batch_size))
 
@@ -2343,8 +2680,13 @@ def make_loaders(
             train_set = Subset(dataset, train_idx)
             val_set = Subset(dataset, val_idx)
             test_set = Subset(dataset, test_idx)
-    elif use_few_shot:
+    elif use_few_shot and split_strategy == "balanced":
         train_idx, val_idx, test_idx = _few_shot_indices_from_graphs()
+        train_set = Subset(dataset, train_idx)
+        val_set = Subset(dataset, val_idx)
+        test_set = Subset(dataset, test_idx)
+    elif use_few_shot and split_strategy == "random":
+        train_idx, val_idx, test_idx = _count_indices_from_graphs()
         train_set = Subset(dataset, train_idx)
         val_set = Subset(dataset, val_idx)
         test_set = Subset(dataset, test_idx)
@@ -2425,41 +2767,17 @@ def dataset_info(
     induced: bool = False
 ) -> Dict:
     """Get meta information about the dataset."""
+    def _task_type_label() -> str:
+        if getattr(dataset, "has_labels", None) is False:
+            return "none"
+        return "regression" if is_regression_dataset(dataset, task_level) else "classification"
 
-    def _task_type(level: str) -> str:
-        if getattr(dataset, "has_labels", True) is False:
-            return "unlabeled"
-        return "regression" if is_regression_dataset(dataset, level) else "classification"
-
-    def _graph_aggregate_stats():
-        num_graphs = int(getattr(dataset, "num_graphs", len(dataset)))
-        total_nodes = getattr(dataset, "total_nodes", None)
-        total_edges = getattr(dataset, "total_edges", None)
-        avg_nodes = getattr(dataset, "avg_nodes_per_graph", None)
-        avg_edges = getattr(dataset, "avg_edges_per_graph", None)
-        if avg_nodes is not None and avg_edges is not None:
-            return num_graphs, round(float(avg_nodes), 2), round(float(avg_edges), 2)
-        if total_nodes is None or total_edges is None:
-            sample_count = min(num_graphs, 2048)
-            if sample_count <= 0:
-                return num_graphs, 0.0, 0.0
-            node_total = 0
-            edge_total = 0
-            for idx in range(sample_count):
-                graph = dataset[idx]
-                node_total += int(getattr(graph, "num_nodes", 0))
-                edge_total += int(getattr(graph, "num_edges", 0))
-            avg_nodes = float(node_total) / float(sample_count)
-            avg_edges = float(edge_total) / float(sample_count)
-            return num_graphs, round(avg_nodes, 2), round(avg_edges, 2)
-        avg_nodes = round(float(total_nodes) / num_graphs, 2) if num_graphs > 0 else 0.0
-        avg_edges = round(float(total_edges) / num_graphs, 2) if num_graphs > 0 else 0.0
-        return num_graphs, avg_nodes, avg_edges
-
-    def _log_info(level: str, info: Dict) -> None:
+    def _log_info(info: Dict) -> None:
         """Pretty-print dataset statistics."""
 
-        ordered = []
+        ordered = [f"task level={task_level}", f"task type={_task_type_label()}"]
+        if induced:
+            ordered.append("induced=True")
         for key in (
             "num_node_features",
             "num_classes",
@@ -2472,19 +2790,18 @@ def dataset_info(
             if key in info:
                 ordered.append(f"{key}={info[key]}")
         summary = ", ".join(ordered)
-        prefix = f"{name}: " if name else ""
-        print(f"[Dataset info][{level}] {prefix}{summary}")
+        prefix = f"dataset={name}, " if name else ""
+        print(f"[Dataset info] {prefix}{summary}")
 
     if task_level == "node":
         data = dataset[0]
         if induced and not hasattr(dataset, "graphs"):
             raise RuntimeError("Induced node dataset missing graphs; generation failed.")
-        task_type = _task_type("node")
         num_classes = None
         label_dim = None
-        if task_type == "classification" and hasattr(dataset, "num_classes") and dataset.num_classes is not None:
+        if hasattr(dataset, "num_classes") and dataset.num_classes is not None:
             num_classes = dataset.num_classes
-        elif task_type == "classification" and getattr(data, "y", None) is not None and data.y.numel() > 0:
+        elif getattr(data, "y", None) is not None and data.y.numel() > 0:
             num_classes = int(data.y.max().item() + 1)
         if getattr(data, "y", None) is not None:
             y = torch.as_tensor(data.y)
@@ -2497,7 +2814,6 @@ def dataset_info(
             "num_node_features": data.num_node_features,
             "num_classes": num_classes,
             "label_dim": label_dim,
-            "task_type": task_type,
             "num_nodes": dataset.base_num_nodes if induced and getattr(dataset, "base_num_nodes", None) is not None else (len(dataset) if induced else data.num_nodes),
             "num_edges": dataset.base_num_edges if induced and getattr(dataset, "base_num_edges", None) is not None else data.num_edges,
         }
@@ -2505,19 +2821,18 @@ def dataset_info(
             info["num_graphs"] = len(dataset)
             info["avg_nodes_per_graph"] = round(float(sum(g.num_nodes for g in dataset.graphs) / len(dataset)), 2)
             info["avg_edges_per_graph"] = round(float(sum(g.num_edges for g in dataset.graphs) / len(dataset)), 2)
-        _log_info("induced-node" if induced else "node", info)
+        _log_info(info)
         return info
     
     elif task_level == "edge":
         data = dataset[0]
         if induced and not hasattr(dataset, "graphs"):
             raise RuntimeError("Induced edge dataset missing graphs; generation failed.")
-        task_type = _task_type("edge")
         num_classes = None
         label_dim = None
-        if task_type == "classification" and hasattr(dataset, "num_classes") and dataset.num_classes is not None:
+        if hasattr(dataset, "num_classes") and dataset.num_classes is not None:
             num_classes = dataset.num_classes
-        elif task_type == "classification" and getattr(data, "y", None) is not None and data.y.numel() > 0:
+        elif getattr(data, "y", None) is not None and data.y.numel() > 0:
             num_classes = int(data.y.max().item() + 1)
         if getattr(data, "y", None) is not None:
             y = torch.as_tensor(data.y)
@@ -2529,7 +2844,6 @@ def dataset_info(
             "num_node_features": data.num_node_features,
             "num_classes": num_classes,
             "label_dim": label_dim,
-            "task_type": task_type,
             "num_nodes": dataset.base_num_nodes if induced and getattr(dataset, "base_num_nodes", None) is not None else (len(dataset) if induced else data.num_nodes),
             "num_edges": dataset.base_num_edges if induced and getattr(dataset, "base_num_edges", None) is not None else data.num_edges,
         }
@@ -2537,12 +2851,11 @@ def dataset_info(
             info["num_graphs"] = len(dataset)
             info["avg_nodes_per_graph"] = round(float(sum(g.num_nodes for g in dataset.graphs) / len(dataset)), 2)
             info["avg_edges_per_graph"] = round(float(sum(g.num_edges for g in dataset.graphs) / len(dataset)), 2)
-        _log_info("induced-edge" if induced and hasattr(dataset, "graphs") else "edge", info)
+        _log_info(info)
         return info
     
     elif task_level == "graph":
         sample = dataset[0]
-        task_type = _task_type("graph")
         sample_y = getattr(sample, "y", None)
         if sample_y is None:
             label_dim = None
@@ -2552,17 +2865,27 @@ def dataset_info(
                 label_dim = 1
             else:
                 label_dim = int(y.size(-1))
-        num_graphs, avg_nodes, avg_edges = _graph_aggregate_stats()
+        num_graphs = int(len(dataset))
+        avg_nodes = getattr(dataset, "avg_nodes_per_graph", None)
+        avg_edges = getattr(dataset, "avg_edges_per_graph", None)
+        if avg_nodes is None or avg_edges is None:
+            total_nodes = getattr(dataset, "total_nodes", None)
+            total_edges = getattr(dataset, "total_edges", None)
+            if total_nodes is not None and total_edges is not None and num_graphs > 0:
+                avg_nodes = float(total_nodes) / float(num_graphs)
+                avg_edges = float(total_edges) / float(num_graphs)
+        if avg_nodes is None or avg_edges is None:
+            avg_nodes = float(sum(g.num_nodes for g in dataset) / len(dataset))
+            avg_edges = float(sum(g.num_edges for g in dataset) / len(dataset))
         info = {
             "num_node_features": sample.num_features,
-            "num_classes": dataset.num_classes if task_type == "classification" and hasattr(dataset, "num_classes") else None,
+            "num_classes": _safe_dataset_num_classes(dataset),
             "label_dim": label_dim,
-            "task_type": task_type,
             "num_graphs": num_graphs,
-            "avg_nodes_per_graph": avg_nodes,
-            "avg_edges_per_graph": avg_edges,
+            "avg_nodes_per_graph": round(float(avg_nodes), 2),
+            "avg_edges_per_graph": round(float(avg_edges), 2),
         }
-        _log_info("induced-graph" if induced else "graph", info)
+        _log_info(info)
         return info
 
     raise ValueError(f"Unsupported task_level: {task_level}")
@@ -2666,7 +2989,7 @@ def compute_subgraph_svd_features(
     if path.exists() and not overwrite:
         print(f"[SubgraphSVD] Found cached features at {path}, skipping.")
         return path
-    print(f"[SubgraphSVD] Processing features for {dataset_name} (task={task_level})...")
+    print(f"[SubgraphSVD] Processing features for {dataset_name} (task level={task_level})...")
 
     graphs = getattr(dataset, "graphs", None)
     if graphs is None:
@@ -2776,5 +3099,5 @@ def log_split_instance_counts(
         formatted = format_split_for_name(split)
         split_label = f", split={formatted or split}"
     induced_label = ", induced" if induced else ""
-    print(f"{prefix} ({task_level}{induced_label}{split_label}): " + ", ".join(parts))
+    print(f"{prefix} (task level={task_level}{induced_label}{split_label}): " + ", ".join(parts))
     return counts

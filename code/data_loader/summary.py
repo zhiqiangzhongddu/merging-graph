@@ -26,7 +26,7 @@ class DatasetSummaryRow:
     num_edges: int
     avg_edges: float
     num_features: int
-    task: str
+    task_type: str
     num_labels: int
 
 
@@ -68,20 +68,11 @@ def _sum_from_slices(dataset, key: str) -> Optional[int]:
 
 
 def _compute_graph_totals(dataset) -> tuple[int, int, int]:
-    num_graphs = int(getattr(dataset, "num_graphs", len(dataset)))
-    total_nodes = getattr(dataset, "total_nodes", None)
-    total_edges = getattr(dataset, "total_edges", None)
-    if total_nodes is not None and total_edges is not None:
-        return num_graphs, int(total_nodes), int(total_edges)
-
-    avg_nodes = getattr(dataset, "avg_nodes_per_graph", None)
-    avg_edges = getattr(dataset, "avg_edges_per_graph", None)
-    if avg_nodes is not None and avg_edges is not None:
-        return (
-            num_graphs,
-            int(round(float(avg_nodes) * float(num_graphs))),
-            int(round(float(avg_edges) * float(num_graphs))),
-        )
+    num_graphs = int(len(dataset))
+    cached_nodes = getattr(dataset, "total_nodes", None)
+    cached_edges = getattr(dataset, "total_edges", None)
+    if cached_nodes is not None and cached_edges is not None:
+        return num_graphs, int(cached_nodes), int(cached_edges)
 
     total_nodes = _sum_from_slices(dataset, "x")
     total_edges = _sum_from_slices(dataset, "edge_index")
@@ -106,6 +97,8 @@ def _compute_graph_totals(dataset) -> tuple[int, int, int]:
 
 def _extract_labels(dataset, task_level: str) -> Optional[torch.Tensor]:
     try:
+        if getattr(dataset, "has_labels", None) is False:
+            return None
         if task_level == "node":
             data = dataset[0]
             labels = getattr(data, "y", None)
@@ -198,14 +191,9 @@ def _summarize_node_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
     edge_index = getattr(data, "edge_index", None)
     num_edges = int(edge_index.size(1)) if edge_index is not None else 0
 
-    unlabeled = getattr(dataset, "has_labels", True) is False
     regression = is_regression_dataset(dataset, "node")
-    if unlabeled:
-        task = "unlabeled"
-        num_labels = -1
-    else:
-        task = "regression" if regression else "classification"
-        num_labels = -1 if regression else _num_classes_for_classification(dataset, "node")
+    task_type = "regression" if regression else "classification"
+    num_labels = -1 if regression else _num_classes_for_classification(dataset, "node")
     num_features = _num_features(dataset, "node")
 
     return DatasetSummaryRow(
@@ -217,7 +205,7 @@ def _summarize_node_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
         num_edges=num_edges,
         avg_edges=float(num_edges),
         num_features=num_features,
-        task=task,
+        task_type=task_type,
         num_labels=num_labels,
     )
 
@@ -235,13 +223,12 @@ def _summarize_graph_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
     avg_nodes = float(total_nodes) / float(num_graphs) if num_graphs > 0 else 0.0
     avg_edges = float(total_edges) / float(num_graphs) if num_graphs > 0 else 0.0
 
-    unlabeled = getattr(dataset, "has_labels", True) is False
-    regression = is_regression_dataset(dataset, "graph")
-    if unlabeled:
-        task = "unlabeled"
+    if getattr(dataset, "has_labels", None) is False:
+        task_type = "none"
         num_labels = -1
     else:
-        task = "regression" if regression else "classification"
+        regression = is_regression_dataset(dataset, "graph")
+        task_type = "regression" if regression else "classification"
         num_labels = -1 if regression else _num_classes_for_classification(dataset, "graph")
     num_features = _num_features(dataset, "graph")
 
@@ -254,7 +241,7 @@ def _summarize_graph_dataset(name: str, dataset_root: str) -> DatasetSummaryRow:
         num_edges=total_edges,
         avg_edges=avg_edges,
         num_features=num_features,
-        task=task,
+        task_type=task_type,
         num_labels=num_labels,
     )
 
@@ -278,7 +265,7 @@ def _row_from_record(record: dict) -> Optional[DatasetSummaryRow]:
             num_edges=int(record.get("#edges", 0)),
             avg_edges=float(record.get("#avg. edges", 0.0)),
             num_features=int(record.get("#features", -1)),
-            task=str(record.get("task", "")).strip(),
+            task_type=str(record.get("task type") or record.get("task_type") or record.get("task") or "").strip(),
             num_labels=int(record.get("#labels", -1)),
         )
     except Exception:
@@ -342,7 +329,7 @@ def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> int:
                 "#edges",
                 "#avg. edges",
                 "#features",
-                "task",
+                "task type",
                 "#labels",
             ]
         )
@@ -357,7 +344,7 @@ def _rows_to_tsv(rows: Sequence[DatasetSummaryRow], output_path: Path) -> int:
                     row.num_edges,
                     f"{row.avg_edges:.2f}",
                     row.num_features,
-                    row.task,
+                    row.task_type,
                     row.num_labels,
                 ]
             )

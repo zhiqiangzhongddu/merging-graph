@@ -14,7 +14,7 @@ from code.config import cfg as base_cfg, update_cfg
 from code.utils import set_seed
 
 from .finetuner import FinetuneRunner
-from .utils import resolve_pretrained_checkpoint, run_finetune_tasks
+from .utils import extract_few_shot, resolve_pretrained_checkpoint, run_finetune_tasks
 
 MetricDict = Dict[str, float]
 _SUMMARY_EXCLUDED_METRICS = {"batch_size", "test_loss"}
@@ -136,8 +136,18 @@ def _resolve_checkpoint_once(cfg) -> Tuple[Optional[str], Optional[str], int]:
 
 
 def _build_finetune_cfg(argv: Iterable[str]):
-    """Parse CLI overrides for finetuning."""
-    return update_cfg(base_cfg, " ".join(list(argv)))
+    """
+    Parse CLI overrides for finetuning.
+
+    `fewshot` overrides `finetune.dataset.fixed_split`.
+    """
+    raw_argv = list(argv)
+    forwarded_argv, few_shot_split = extract_few_shot(raw_argv)
+    cfg = update_cfg(base_cfg, " ".join(forwarded_argv))
+
+    if few_shot_split is not None:
+        cfg.finetune.dataset.fixed_split = few_shot_split
+    return cfg
 
 
 def run_finetune(cfg) -> int:

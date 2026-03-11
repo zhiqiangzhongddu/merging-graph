@@ -408,8 +408,8 @@ class PretrainRunner:
                 if not (name_match and method_match and task_match and induced_match):
                     raise RuntimeError(
                         f"Refusing to overwrite existing checkpoint at {self.run_dir} "
-                        f"(found dataset={prev_name}, method={prev_method}, task={prev_task}, induced={prev_induced}; "
-                        f"current={curr_name}/{curr_method}/{curr_task_raw}|{curr_task_cfg}/{curr_induced}). "
+                        f"(found dataset={prev_name}, method={prev_method}, task level={prev_task}, induced={prev_induced}; "
+                        f"current={curr_name}/{curr_method}/task level={curr_task_raw}|{curr_task_cfg}/induced={curr_induced}). "
                         f"Please set pretrain.run_name explicitly."
                     )
             except RuntimeError:

@@ -9,6 +9,8 @@ CLASS_TO_DOMAIN = {
     "MoleculeNet": "molecules",
     "QM7b": "molecules",
     "QM9": "molecules",
+    "ZINC": "molecules",
+    "ZINC15": "molecules",
     # Citation / academic graphs
     "Planetoid": "citation",
     "CitationFull": "citation",

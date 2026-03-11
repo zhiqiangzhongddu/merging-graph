@@ -218,7 +218,7 @@ class GraphCL(PretrainTask):
         self.feature_mask_prob = cfg.pretrain.graphcl.feature_mask_prob
         self.permE_add_edges = bool(getattr(cfg.pretrain.graphcl, "permE_add_edges", False))
         self.use_subgraph_aug = bool(getattr(cfg.pretrain.graphcl, "use_subgraph_aug", True))
-        self.subgraph_ratio = float(getattr(cfg.pretrain.graphcl, "subgraph_ratio", 0.3))
+        self.subgraph_ratio = float(getattr(cfg.pretrain.graphcl, "subgraph_ratio", 0.2))
 
         # Augmentations from GraphCL family.
         self.augmentations: List[Callable] = [

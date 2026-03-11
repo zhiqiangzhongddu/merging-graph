@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 from pathlib import Path
@@ -5,6 +6,33 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from code.utils import build_run_name_from_cfg
 from code.finetune.finetuner import FinetuneRunner
+
+
+def extract_few_shot(argv: List[str]) -> Tuple[List[str], Optional[Tuple[int, float, float]]]:
+    """Pull a `--fewshot shots val_ratio test_ratio` override out of argv."""
+    cleaned: List[str] = []
+    few_shot: Optional[Tuple[int, float, float]] = None
+    idx = 0
+    while idx < len(argv):
+        token = argv[idx]
+        if token == "--fewshot":
+            if idx + 3 >= len(argv):
+                raise ValueError("--fewshot requires: shots_per_class val_ratio test_ratio")
+            shots = int(argv[idx + 1])
+            val_ratio = float(argv[idx + 2])
+            test_ratio = float(argv[idx + 3])
+            if shots < 1:
+                raise ValueError("--fewshot requires shots_per_class >= 1.")
+            if val_ratio < 0.0 or test_ratio < 0.0:
+                raise ValueError("--fewshot requires non-negative val_ratio and test_ratio.")
+            if (val_ratio + test_ratio) <= 0.0:
+                raise ValueError("--fewshot requires val_ratio + test_ratio > 0.")
+            few_shot = (shots, val_ratio, test_ratio)
+            idx += 4
+            continue
+        cleaned.append(token)
+        idx += 1
+    return cleaned, few_shot
 
 
 def parse_finetune_tasks(tsv_path: str) -> List[Tuple[str, str, bool]]:
@@ -47,14 +75,7 @@ def _iter_checkpoint_files(root: str) -> List[str]:
     root_path = Path(root)
     if not root_path.is_dir():
         return []
-    checkpoint_files: List[str] = []
-    for dataset_dir in sorted(path for path in root_path.iterdir() if path.is_dir()):
-        checkpoint_files.extend(
-            str(path)
-            for path in sorted(dataset_dir.glob("*.pt"))
-            if path.is_file()
-        )
-    return checkpoint_files
+    return sorted(str(path) for path in root_path.rglob("*.pt") if path.is_file())
 
 
 def _extract_pretrain_meta_from_log(log_path: Path) -> Dict[str, Any]:
@@ -128,20 +149,19 @@ def resolve_pretrained_checkpoint(cfg) -> Tuple[Optional[str], Optional[str]]:
     dataset_name = str(getattr(getattr(cfg.pretrain, "dataset", None), "name", "") or "")
     dataset_dir_name = _checkpoint_dataset_dir_name(dataset_name)
 
-    # Preferred layout: pretrained_models/<dataset>/<run_name>.pt
     candidate = os.path.join(ckpt_root, dataset_dir_name, f"{run_name}.pt")
     if os.path.isfile(candidate):
         return candidate, run_name
 
-    # Fallback: search by dataset/method/task_level/induced when run_name differs.
+    exact_matches = sorted(glob.glob(os.path.join(ckpt_root, "**", f"{run_name}.pt"), recursive=True))
+    if exact_matches:
+        return exact_matches[0], run_name
+
     dataset_name = dataset_name.lower()
     task_level = str(getattr(getattr(cfg.pretrain, "dataset", None), "task_level", "")).lower()
     induced = bool(getattr(getattr(cfg.pretrain, "dataset", None), "induced", False))
     method = str(getattr(cfg.pretrain, "method", "")).lower()
     candidates = collect_pretrained_checkpoints(ckpt_root)
-    for ckpt in candidates:
-        if str(ckpt.get("run_name") or "") == run_name:
-            return ckpt["path"], run_name
     for ckpt in candidates:
         if (
             str(ckpt.get("dataset") or "").lower() == dataset_name
@@ -189,7 +209,7 @@ def run_finetune_tasks(cfg) -> int:
 
             print(
                 f"[Finetune] Running {ckpt.get('run_name')} -> "
-                f"{dataset_name} (task={task_level}, induced={induced})"
+                f"{dataset_name} (task level={task_level}, induced={induced})"
             )
             run_cfg = _build_task_cfg(cfg, dataset_name, task_level, induced)
             try:

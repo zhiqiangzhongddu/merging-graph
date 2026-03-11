@@ -185,6 +185,7 @@ class PromptGNNEncoder(nn.Module):
         self,
         data,
         prompt=None,
+        prompt_type: Optional[str] = None,
     ):
         x, edge_index = data.x, getattr(data, "edge_index", None)
         batch = getattr(data, "batch", None)
@@ -194,7 +195,7 @@ class PromptGNNEncoder(nn.Module):
 
         for idx, conv in enumerate(self.convs):
             edge_prompt = None
-            if prompt is not None:
+            if prompt is not None and prompt_type in ("EdgePrompt", "EdgePromptplus", "edgeprompt", "edgepromptplus"):
                 edge_prompt = prompt.get_prompt(x, edge_index, layer=idx)
 
             x = conv(x, edge_index, edge_prompt=edge_prompt)

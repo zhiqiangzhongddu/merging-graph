@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-from code.config import update_cfg
+from code.config import cfg as base_cfg, update_cfg
 from code.data_loader.dataset_prepare import prepare_datasets, read_datasets
 from code.data_loader.datasets import infer_task_level
 from code.data_loader.summary import run_data_summary
@@ -35,18 +35,6 @@ def _print_stage_header(title: str, char: str = "=") -> None:
     print(line)
 
 
-def _normalize_targets(value) -> TargetSelection:
-    """Normalize target input into either a path/string or an explicit list of names."""
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple, set)):
-        return [str(item) for item in value]
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return [str(value)]
-
-
 def _parse_target_value(raw: str) -> Union[str, List[str]]:
     """Parse CLI target value like `[cora,actor]`, `cora,actor`, or `path/to/list.tsv`."""
     text = str(raw).strip()
@@ -71,8 +59,49 @@ def _parse_target_value(raw: str) -> Union[str, List[str]]:
     return items
 
 
+def _looks_like_dataset_list_path(value: str) -> bool:
+    """Treat path-like strings as dataset-list files instead of singleton dataset names."""
+    text = str(value).strip().strip("'\"")
+    if not text:
+        return False
+
+    path = Path(text).expanduser()
+    return (
+        path.exists()
+        or text.startswith((".", "/", "~"))
+        or "/" in text
+        or "\\" in text
+        or path.suffix.lower() in {".tsv", ".txt", ".csv", ".list"}
+    )
+
+
+def _normalize_targets(value) -> TargetSelection:
+    """Normalize target input into either a list of dataset names or a dataset-list path."""
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple, set)):
+        names = [str(item).strip().strip("'\"") for item in value if str(item).strip().strip("'\"")]
+        return names or None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    parsed = _parse_target_value(text) if "," in text or (text.startswith("[") and text.endswith("]")) else text
+    if isinstance(parsed, list):
+        return parsed or None
+
+    cleaned = str(parsed).strip().strip("'\"")
+    if not cleaned:
+        return None
+    if _looks_like_dataset_list_path(cleaned):
+        return cleaned
+    return [cleaned]
+
+
 def _extract_target_override(argv: List[str]) -> Tuple[List[str], TargetSelection]:
-    """Extract `data_preparation.target_datasets` from argv for robust list parsing."""
+    """Extract `data_preparation.target_datasets` from argv for robust singleton/list parsing."""
     cleaned: List[str] = []
     override: TargetSelection = None
     idx = 0
@@ -81,7 +110,7 @@ def _extract_target_override(argv: List[str]) -> Tuple[List[str], TargetSelectio
         if token == "data_preparation.target_datasets":
             if idx + 1 >= len(argv):
                 raise ValueError("data_preparation.target_datasets requires a value")
-            override = _parse_target_value(argv[idx + 1])
+            override = _normalize_targets(_parse_target_value(argv[idx + 1]))
             idx += 2
             continue
         cleaned.append(token)
@@ -173,30 +202,6 @@ def _resolve_stage_plan(cfg, targets: TargetSelection) -> List[_PrepStage]:
     include_edge_level = bool(getattr(dp_cfg, "generate_edge_level", True))
     node_task_levels = ("node", "edge") if include_edge_level else ("node",)
 
-    if not targets:
-        stages: List[_PrepStage] = []
-        if node_list:
-            stages.append(
-                _PrepStage(
-                    title="[DataPrep] Dataset preparation (node/edge)",
-                    datasets=node_list,
-                    task_levels=node_task_levels,
-                    induced=bool(getattr(ds_cfg, "induced", True)),
-                    use_infer=False,
-                )
-            )
-        if graph_list:
-            stages.append(
-                _PrepStage(
-                    title="[DataPrep] Dataset preparation (graph)",
-                    datasets=graph_list,
-                    task_levels=("graph",),
-                    induced=False,
-                    use_infer=False,
-                )
-            )
-        return stages
-
     if isinstance(targets, list):
         return [
             _PrepStage(
@@ -264,6 +269,8 @@ def _run_prepare_stage(
         induced_min_size=getattr(ds_cfg, "induced_min_size", 10),
         induced_max_size=getattr(ds_cfg, "induced_max_size", 30),
         induced_max_hops=getattr(ds_cfg, "induced_max_hops", 5),
+        induced_skip_node_threshold=getattr(ds_cfg, "induced_skip_node_threshold", None),
+        edge_level_max_num_nodes=getattr(ds_cfg, "edge_level_max_num_nodes", None),
         induced_root=getattr(ds_cfg, "induced_root", ""),
         subgraph_svd=getattr(ds_cfg, "subgraph_svd", True),
         subgraph_svd_feat_dim=getattr(ds_cfg, "subgraph_svd_feat_dim", 100),
@@ -338,7 +345,26 @@ def _collect_summary_dataset_names(stages: List[_PrepStage]) -> Tuple[List[str],
 def run_data_preparation(cfg) -> int:
     """Main orchestrator used by `run_data_preparation.py`."""
     dp_cfg = cfg.data_preparation
+    ds_cfg = dp_cfg.dataset
+
+    # Backward compatibility: older configs may store target datasets directly
+    # under `cfg.data_preparation.dataset`.
+    fallback_targets = None
+    if not hasattr(ds_cfg, "root"):
+        fallback_targets = ds_cfg
+        cfg.data_preparation.dataset = base_cfg.data_preparation.dataset.clone()
+
     targets = _normalize_targets(getattr(dp_cfg, "target_datasets", None))
+    if (targets is None or targets == []) and fallback_targets is not None:
+        targets = _normalize_targets(fallback_targets)
+
+    if not targets:
+        print(
+            "[DataPrep][Error] `data_preparation.target_datasets` is required. "
+            "Pass a dataset name like `cora`, a comma-separated list like `cora,actor`, "
+            "or a dataset list file like `data/available_node_datasets.tsv`."
+        )
+        return 1
 
     stages = _resolve_stage_plan(cfg, targets)
     if not stages:

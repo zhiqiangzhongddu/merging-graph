@@ -56,24 +56,50 @@ class FinetuneGraphPrompt(FinetuneTask):
         self.prompt_init_std = float(getattr(method_cfg, "init_std", 0.02)) if method_cfg else 0.02
         self.update_pretrained = bool(getattr(method_cfg, "update_pretrained", False)) if method_cfg else False
         self.tau = float(getattr(method_cfg, "tau", 0.1)) if method_cfg else 0.1
-        self.score_mode = str(getattr(method_cfg, "score_mode", "neg_distance") if method_cfg else "neg_distance").lower()
-        self.loss_reduction = str(getattr(method_cfg, "loss_reduction", "mean") if method_cfg else "mean").lower()
-        self.train_center_mode = str(getattr(method_cfg, "train_center_mode", "batch") if method_cfg else "batch").lower()
-        self.eval_center_mode = str(getattr(method_cfg, "eval_center_mode", "train") if method_cfg else "train").lower()
-        self.graph_pooling_mode = str(getattr(method_cfg, "graph_pooling", "sum") if method_cfg else "sum").lower()
+        raw_score_mode = str(getattr(method_cfg, "score_mode", "neg_distance") if method_cfg else "neg_distance").lower()
+        if raw_score_mode == "auto":
+            # Backward-compatible alias.
+            raw_score_mode = "neg_distance"
+        self.score_mode = raw_score_mode
+
+        raw_reduction = str(getattr(method_cfg, "loss_reduction", "mean") if method_cfg else "mean").lower()
+        if raw_reduction == "auto":
+            # Backward-compatible alias.
+            raw_reduction = "mean"
+        self.loss_reduction = raw_reduction
+
+        raw_train_center_mode = str(getattr(method_cfg, "train_center_mode", "batch") if method_cfg else "batch").lower()
+        if raw_train_center_mode == "auto":
+            # Backward-compatible alias.
+            raw_train_center_mode = "batch"
+        self.train_center_mode = raw_train_center_mode
+
+        raw_eval_center_mode = str(getattr(method_cfg, "eval_center_mode", "train") if method_cfg else "train").lower()
+        if raw_eval_center_mode == "auto":
+            # Backward-compatible alias.
+            raw_eval_center_mode = "train"
+        self.eval_center_mode = raw_eval_center_mode
+
+        raw_graph_pooling_mode = str(getattr(method_cfg, "graph_pooling", "sum") if method_cfg else "sum").lower()
+        if raw_graph_pooling_mode == "auto":
+            # Backward-compatible alias.
+            raw_graph_pooling_mode = "sum"
+        self.graph_pooling_mode = raw_graph_pooling_mode
         self.prompt_dropout = float(getattr(method_cfg, "prompt_dropout", 0.0)) if method_cfg else 0.0
         self.embedding_scalar = float(getattr(method_cfg, "embedding_scalar", 1e3)) if method_cfg else 1e3
         self.center_momentum = float(getattr(method_cfg, "center_momentum", 0.9)) if method_cfg else 0.9
         if self.score_mode not in {"neg_distance", "distance", "cosine"}:
-            raise ValueError("graphprompt.score_mode must be one of: neg_distance, distance, cosine.")
+            raise ValueError("graphprompt.score_mode must be one of: neg_distance, distance, cosine (auto maps to neg_distance).")
         if self.loss_reduction not in {"mean", "sum"}:
-            raise ValueError("graphprompt.loss_reduction must be one of: mean, sum.")
+            raise ValueError("graphprompt.loss_reduction must be one of: mean, sum (auto maps to mean).")
         if self.train_center_mode not in {"batch", "train", "ema"}:
-            raise ValueError("graphprompt.train_center_mode must be one of: batch, train, ema.")
+            raise ValueError("graphprompt.train_center_mode must be one of: batch, train, ema (auto maps to batch).")
         if self.eval_center_mode not in {"train", "batch"}:
-            raise ValueError("graphprompt.eval_center_mode must be one of: train, batch.")
+            raise ValueError("graphprompt.eval_center_mode must be one of: train, batch (auto maps to train).")
         if self.graph_pooling_mode not in {"encoder", "sum", "add", "mean", "max", "target"}:
-            raise ValueError("graphprompt.graph_pooling must be one of: encoder, sum, add, mean, max, target.")
+            raise ValueError(
+                "graphprompt.graph_pooling must be one of: encoder, sum, add, mean, max, target (auto maps to sum)."
+            )
         if self.prompt_dropout < 0.0 or self.prompt_dropout >= 1.0:
             raise ValueError("graphprompt.prompt_dropout must be in [0.0, 1.0).")
 
@@ -113,8 +139,6 @@ class FinetuneGraphPrompt(FinetuneTask):
             if method_cfg
             else float(self.cfg.finetune.weight_decay)
         )
-        amsgrad = bool(getattr(method_cfg, "amsgrad", True)) if method_cfg else True
-
         param_groups = [
             {
                 "params": list(self.prompt.parameters()),
@@ -132,7 +156,7 @@ class FinetuneGraphPrompt(FinetuneTask):
                 }
             )
 
-        optimizer = torch.optim.AdamW(param_groups, amsgrad=amsgrad)
+        optimizer = torch.optim.AdamW(param_groups, amsgrad=True)
         return {"primary": optimizer}
 
     def _set_encoder_train_mode(self, model: nn.Module) -> None:

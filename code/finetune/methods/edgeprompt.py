@@ -34,21 +34,15 @@ class FinetuneEdgePrompt(FinetuneTask):
         method_cfg = getattr(cfg.finetune, "edgeprompt", None)
         self.method_cfg = method_cfg
 
-        use_plus = True
-        if method_cfg is not None and hasattr(method_cfg, "plus"):
-            use_plus = bool(getattr(method_cfg, "plus"))
+        use_plus = bool(getattr(method_cfg, "plus", True)) if method_cfg is not None else True
 
-        raw_anchors = None
-        if method_cfg is not None and hasattr(method_cfg, "num_anchors"):
-            raw_anchors = getattr(method_cfg, "num_anchors")
+        raw_anchors = getattr(method_cfg, "num_anchors", None) if method_cfg is not None else None
         num_anchors = None if raw_anchors is None else int(raw_anchors)
         if num_anchors is None:
             # Follow official defaults: node-style downstream uses more anchors.
             num_anchors = 10 if self.task_level_raw == "node" else 5
 
-        raw_add_self_loops = None
-        if method_cfg is not None and hasattr(method_cfg, "add_self_loops"):
-            raw_add_self_loops = getattr(method_cfg, "add_self_loops")
+        raw_add_self_loops = getattr(method_cfg, "add_self_loops", None) if method_cfg is not None else None
 
         if raw_add_self_loops is None:
             # Official graph EdgePromptplus does not add self-loops in prompt construction.
@@ -86,6 +80,7 @@ class FinetuneEdgePrompt(FinetuneTask):
                 dim_list=dim_list,
                 add_self_loops=add_self_loops,
             )
+        self.prompt_type = "EdgePromptplus" if use_plus else "EdgePrompt"
         self.classifier = nn.Linear(cfg.model.out_dim, self.num_classes)
 
     def parameters_to_optimize(self):
@@ -127,7 +122,7 @@ class FinetuneEdgePrompt(FinetuneTask):
         return_logits: bool = False,
     ) -> Tuple[torch.Tensor, float]:
         data = data.to(device)
-        node_repr, graph_repr = model(data, prompt=self.prompt)
+        node_repr, graph_repr = model(data, prompt=self.prompt, prompt_type=self.prompt_type)
 
         if self.task_level == "node":
             logits = self.classifier(node_repr)

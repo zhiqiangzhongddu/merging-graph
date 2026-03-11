@@ -28,25 +28,22 @@ class FinetuneGPF(FinetuneTask):
 
         method_cfg = getattr(cfg.finetune, "gpf", None)
         plus_flag = self._to_bool(getattr(method_cfg, "plus", False)) if method_cfg else False
-        variant = "gpf_plus" if plus_flag else "gpf"
         p_num = int(getattr(method_cfg, "p_num", 20)) if method_cfg else 20
 
         self.prompt_in_dim = int(getattr(cfg.model, "in_dim", 0) or 0)
         if self.prompt_in_dim <= 0:
             raise ValueError("GPF requires model.in_dim > 0.")
 
-        if variant in {"gpf_plus", "gpfplus", "gpf_plus_att", "gpfplusatt"}:
+        if plus_flag:
             self.prompt = GPFPlusPrompt(in_channels=self.prompt_in_dim, p_num=p_num)
             self.prompt_variant = "gpf_plus"
-        elif variant == "gpf":
+        else:
             self.prompt = GPFPrompt(in_channels=self.prompt_in_dim)
             self.prompt_variant = "gpf"
-        else:
-            raise ValueError(f"Unknown gpf variant: {variant}")
 
         # Official GPF scripts tune the prediction head depth (num_layers).
         self.head_layers = (
-            int(getattr(method_cfg, "head_layers", getattr(method_cfg, "num_layers", 1)))
+            int(getattr(method_cfg, "head_layers", 1))
             if method_cfg is not None
             else 1
         )
@@ -129,8 +126,6 @@ class FinetuneGPF(FinetuneTask):
         head_wd = float(getattr(method_cfg, "head_weight_decay", base_wd)) if method_cfg else base_wd
         encoder_lr = float(getattr(method_cfg, "encoder_lr", base_lr)) if method_cfg else base_lr
         encoder_wd = float(getattr(method_cfg, "encoder_weight_decay", base_wd)) if method_cfg else base_wd
-        optimizer_name = str(getattr(method_cfg, "optimizer", "adam") if method_cfg else "adam").lower()
-
         if not self.update_pretrained:
             # Keep behavior consistent with official prompt-only tuning even
             # when global freeze_pretrained is disabled.
@@ -166,14 +161,7 @@ class FinetuneGPF(FinetuneTask):
                     }
                 )
 
-        if optimizer_name == "adam":
-            optimizer_cls = torch.optim.Adam
-        elif optimizer_name == "adamw":
-            optimizer_cls = torch.optim.AdamW
-        else:
-            raise ValueError("gpf.optimizer must be one of: adam, adamw.")
-
-        optimizer = optimizer_cls(param_groups)
+        optimizer = torch.optim.Adam(param_groups)
         return {"primary": optimizer}
 
     def _set_encoder_train_mode(self, model) -> None:

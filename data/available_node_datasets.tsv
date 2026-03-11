@@ -5,7 +5,6 @@ amazon-ratings
 amherst41
 chameleon
 citeseer
-coco-sp
 computers
 cora
 cora_ml
@@ -21,14 +20,16 @@ genius
 johnshopkins55
 minesweeper
 ogbn-arxiv
+ogbn-mag
+pgbn-papers100M
 ogbn-proteins
-pascalvoc-sp
-pcqm-contact
+ogbn-products
 penn94
 photo
 physics
 pubmed
 questions
+reddit
 reddit2
 reed98
 roman-empire

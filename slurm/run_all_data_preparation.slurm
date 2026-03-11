@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name "prep_data"
+#SBATCH --job-name "prep_data_all"
 #SBATCH --time=2-00:00:00       # time (D-HH:MM:SS)
 #SBATCH --account=p201211       # project account
 #SBATCH --partition gpu         # partition

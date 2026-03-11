@@ -16,9 +16,11 @@ os.environ.setdefault("OGB_ASSUME_YES", "1")
 from code.data_loader.datasets import (  # noqa: E402
     create_dataset,
     compute_subgraph_svd_features,
+    dataset_info,
     infer_task_level,
     is_regression_dataset,
     make_loaders,
+    resolve_count_split_strategy,
 )
 
 DATASET_SEPARATOR = "=" * 72
@@ -47,7 +49,6 @@ def _feature_svd_path(dataset_name: str, task_level: str, dim: int, output_dir: 
     suffix = _feature_task_suffix(task_level)
     scoped_dir = Path(_dataset_scoped_dir(output_dir, dataset_name))
     return scoped_dir / f"feature_svd_{dataset_name}{suffix}_d{dim}.pt"
-
 
 def _print_feature_svd_info(
     dataset_name: str,
@@ -101,6 +102,63 @@ def _num_edges(data) -> Optional[int]:
     if edge_index is None:
         return None
     return int(edge_index.size(1))
+
+
+def _dataset_num_nodes(dataset_obj) -> Optional[int]:
+    if dataset_obj is None:
+        return None
+    try:
+        if len(dataset_obj) <= 0:
+            return None
+        data = dataset_obj[0]
+    except Exception:
+        return None
+    return _num_nodes(data)
+
+
+def _should_prepare_edge_level_for_node_dataset(
+    dataset_name: str,
+    root: str,
+    *,
+    node_limit: int | None = None,
+) -> bool:
+    """Return False when a node dataset is too large for derived edge-level preparation."""
+    if node_limit is None or int(node_limit) <= 0:
+        return True
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            dataset_obj = create_dataset(
+                name=dataset_name,
+                root=root,
+                task_level="node",
+                induced=False,
+                feat_reduction=False,
+                persist_feature_svd=False,
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        print(
+            f"[DataPrep] Failed to inspect node count for {dataset_name}; "
+            f"keeping edge-level preparation enabled: {exc}"
+        )
+        return True
+
+    num_nodes = _dataset_num_nodes(dataset_obj)
+    if num_nodes is None:
+        print(
+            f"[DataPrep] Could not determine node count for {dataset_name}; "
+            "keeping edge-level preparation enabled."
+        )
+        return True
+
+    if int(num_nodes) > int(node_limit):
+        print(
+            f"[DataPrep] Skipping edge-level preparation for {dataset_name}: "
+            f"num_nodes={int(num_nodes)} exceeds limit={int(node_limit)}."
+        )
+        return False
+
+    return True
 
 
 def _split_mask_count(data, mask_key: str) -> Optional[int]:
@@ -165,6 +223,60 @@ def _subset_total_from_slices(dataset, key: str) -> Optional[int]:
         return None
 
 
+def _dataset_data_storage(dataset):
+    """Return dataset storage without triggering PyG's `dataset.data` warning when possible."""
+    if "_data" in getattr(dataset, "__dict__", {}):
+        return dataset.__dict__.get("_data", None)
+    return getattr(dataset, "data", None)
+
+
+def _subset_total_from_values(dataset, key: str) -> Optional[int]:
+    """Aggregate per-graph scalar metadata such as `_num_nodes`."""
+    if dataset is None:
+        return None
+
+    base_dataset = dataset
+    indices = None
+    if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+        base_dataset = dataset.dataset
+        try:
+            indices = list(dataset.indices)
+        except Exception:
+            indices = None
+
+    storage = _dataset_data_storage(base_dataset)
+    if storage is None:
+        return None
+
+    if isinstance(storage, dict):
+        values = storage.get(key)
+    else:
+        values = getattr(storage, key, None)
+    if values is None:
+        return None
+
+    try:
+        if torch.is_tensor(values):
+            if values.dim() == 0:
+                return int(values.item()) if indices is None else None
+            if indices is None:
+                return int(values.sum().item())
+            idx = torch.as_tensor(indices, dtype=torch.long)
+            if idx.numel() == 0:
+                return 0
+            return int(values[idx].sum().item())
+
+        if isinstance(values, (list, tuple)):
+            if indices is None:
+                return int(sum(int(value) for value in values))
+            return int(sum(int(values[idx]) for idx in indices))
+
+        scalar = int(values)
+        return scalar if indices is None else None
+    except Exception:
+        return None
+
+
 def _graph_nodes_edges(loader) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     dataset = getattr(loader, "dataset", None)
     if dataset is None:
@@ -172,7 +284,15 @@ def _graph_nodes_edges(loader) -> Tuple[Optional[int], Optional[int], Optional[i
 
     graphs = _dataset_len(loader)
     nodes = _subset_total_from_slices(dataset, "x")
+    if nodes is None:
+        nodes = _subset_total_from_values(dataset, "_num_nodes")
+    if nodes is None:
+        nodes = _subset_total_from_values(dataset, "num_nodes")
     edges = _subset_total_from_slices(dataset, "edge_index")
+    if edges is None and not hasattr(dataset, "dataset"):
+        total_edges = getattr(dataset, "total_edges", None)
+        if total_edges is not None:
+            edges = int(total_edges)
     if nodes is not None and edges is not None:
         return nodes, edges, graphs
 
@@ -283,25 +403,30 @@ def _filter_unsupported_split_defs(
     """Drop unsupported split definitions for the given dataset/task pair."""
     if not split_defs:
         return split_defs
+    split_strategy = resolve_count_split_strategy(dataset_obj, task_level)
+    if split_strategy != "unsupported":
+        return split_defs
 
     kept: List[Tuple[float, float, float]] = []
     skipped: List[Tuple[float, float, float]] = []
-    regression = is_regression_dataset(dataset_obj, task_level)
-    missing_graph_labels = (
-        str(task_level).lower() == "graph"
-        and not regression
-        and _classification_label_count(dataset_obj=dataset_obj, task_level="graph") is None
-    )
-
     for split_def in split_defs:
-        if _is_few_shot_split_def(split_def) and (regression or missing_graph_labels):
+        if _is_few_shot_split_def(split_def):
             skipped.append(split_def)
         else:
             kept.append(split_def)
 
+    if getattr(dataset_obj, "has_labels", None) is False:
+        reason = "unlabeled"
+    elif is_regression_dataset(dataset_obj, task_level):
+        reason = "single-target regression"
+    else:
+        reason = "unsupported"
+
     for split_def in skipped:
-        reason = "regression" if regression else "unlabeled"
-        print(f"[DataPrep][Split] Skip unsupported few-shot split for {reason} dataset={dataset_name} task={task_level} split={split_def}")
+        print(
+            f"[DataPrep][Split] Skip unsupported integer-first split for {reason} "
+            f"dataset={dataset_name} task level={task_level} split={split_def}"
+        )
     return kept
 
 
@@ -346,19 +471,19 @@ def _generate_task_splits(
                 )
                 if split_stats:
                     print(
-                        f"[DataPrep][Split][Stats] dataset={dataset_name} task={task_level} "
+                        f"[DataPrep][Split][Stats] dataset={dataset_name} task level={task_level} "
                         f"split={split_def} seed={seed} {split_stats}"
                     )
             except Exception as exc:  # pylint: disable=broad-except
                 failures += 1
                 print(
-                    f"[DataPrep][Split] Failed dataset={dataset_name} task={task_level} "
+                    f"[DataPrep][Split] Failed dataset={dataset_name} task level={task_level} "
                     f"split={split_def} seed={seed} root={dataset_split_root}: {exc}"
                 )
 
     generated = total_jobs - failures
     print(
-        f"[DataPrep][Split] dataset={dataset_name} task={task_level} "
+        f"[DataPrep][Split] dataset={dataset_name} task level={task_level} "
         f"splits={len(split_defs)} seeds={len(split_seeds)} generated={generated} "
         f"failed={failures} root={dataset_split_root}"
     )
@@ -551,7 +676,7 @@ def _label_count_from_tensor(labels: torch.Tensor) -> Optional[int]:
 
 def _classification_label_count(dataset_obj, task_level: str) -> Optional[int]:
     """Count class labels for classification node/graph datasets."""
-    if getattr(dataset_obj, "has_labels", True) is False:
+    if getattr(dataset_obj, "has_labels", None) is False:
         return None
 
     num_classes = getattr(dataset_obj, "num_classes", None)
@@ -632,34 +757,33 @@ def _classification_label_count(dataset_obj, task_level: str) -> Optional[int]:
 
 
 def _log_node_dataset_overview(dataset: str, dataset_obj) -> None:
-    """Print one node-dataset summary line at the beginning of node-task prep."""
-    num_nodes, num_edges = _num_nodes_edges_from_node_dataset(dataset_obj)
-    parts = [
-        f"dataset={dataset}",
-        f"task=node",
-        f"nodes={num_nodes if num_nodes is not None else '?'}",
-        f"edges={num_edges if num_edges is not None else '?'}",
-    ]
-    if not is_regression_dataset(dataset_obj, "node"):
-        num_labels = _classification_label_count(dataset_obj=dataset_obj, task_level="node")
-        parts.append(f"labels={num_labels if num_labels is not None else '?'}")
-    print("[DataPrep][Dataset] " + ", ".join(parts))
+    """Print node dataset overview."""
+    dataset_info(
+        dataset=dataset_obj,
+        task_level="node",
+        name=dataset,
+        induced=hasattr(dataset_obj, "graphs"),
+    )
 
 
 def _log_graph_dataset_overview(dataset: str, dataset_obj) -> None:
-    """Print one graph-dataset summary line at the beginning of graph-task prep."""
-    num_graphs = _num_graphs_from_graph_dataset(dataset_obj)
-    parts = [
-        f"dataset={dataset}",
-        f"task=graph",
-        f"graphs={num_graphs if num_graphs is not None else '?'}",
-    ]
-    if getattr(dataset_obj, "has_labels", True) is False:
-        parts.append("labels=unlabeled")
-    elif not is_regression_dataset(dataset_obj, "graph"):
-        num_labels = _classification_label_count(dataset_obj=dataset_obj, task_level="graph")
-        parts.append(f"labels={num_labels if num_labels is not None else '?'}")
-    print("[DataPrep][Dataset] " + ", ".join(parts))
+    """Print graph dataset overview."""
+    dataset_info(
+        dataset=dataset_obj,
+        task_level="graph",
+        name=dataset,
+        induced=False,
+    )
+
+
+def _log_edge_dataset_overview(dataset: str, dataset_obj) -> None:
+    """Print edge dataset overview."""
+    dataset_info(
+        dataset=dataset_obj,
+        task_level="edge",
+        name=dataset,
+        induced=False,
+    )
 
 
 def _process_edge_task(
@@ -710,6 +834,7 @@ def _process_edge_task(
         feat_reduction_dim=feat_reduction_dim,
         feature_svd_dir=dataset_feature_svd_dir,
     )
+    _log_edge_dataset_overview(dataset=dataset, dataset_obj=split_dataset_obj)
     split_failures = _generate_task_splits(
         dataset_obj=split_dataset_obj,
         dataset_name=dataset,
@@ -793,6 +918,7 @@ def _process_non_edge_task(
     induced_min_size: int,
     induced_max_size: int,
     induced_max_hops: int,
+    induced_skip_node_threshold: int | None,
     feat_reduction: bool,
     feat_reduction_dim: int,
     subgraph_svd: bool,
@@ -810,24 +936,57 @@ def _process_non_edge_task(
     primary_seed = int(split_seeds[0]) if split_seeds else 42
     effective_split_defs = list(split_defs)
     split_for_dataset = effective_split_defs[0] if effective_split_defs else None
-    task_uses_induced = induced and task_level == "node"
+    requested_task_uses_induced = induced and task_level == "node"
+    effective_task_uses_induced = requested_task_uses_induced
+    base_dataset_obj = None
+    skip_threshold = int(induced_skip_node_threshold or 0)
 
-    dataset_obj = create_dataset(
-        name=dataset,
-        root=root,
-        task_level=task_level,
-        induced=task_uses_induced,
-        induced_min_size=induced_min_size,
-        induced_max_size=induced_max_size,
-        induced_max_hops=induced_max_hops,
-        induced_root=dataset_induced_root,
-        split_root=dataset_split_root,
-        split=split_for_dataset,
-        seed=primary_seed,
-        feat_reduction=feat_reduction,
-        feat_reduction_dim=feat_reduction_dim,
-        feature_svd_dir=dataset_feature_svd_dir,
-    )
+    if requested_task_uses_induced and skip_threshold > 0:
+        with contextlib.redirect_stdout(io.StringIO()):
+            base_dataset_obj = create_dataset(
+                name=dataset,
+                root=root,
+                task_level=task_level,
+                induced=False,
+                induced_min_size=induced_min_size,
+                induced_max_size=induced_max_size,
+                induced_max_hops=induced_max_hops,
+                induced_root=dataset_induced_root,
+                split_root=dataset_split_root,
+                split=None,
+                seed=primary_seed,
+                feat_reduction=feat_reduction,
+                feat_reduction_dim=feat_reduction_dim,
+                feature_svd_dir=dataset_feature_svd_dir,
+            )
+        base_num_nodes = _dataset_num_nodes(base_dataset_obj)
+        if base_num_nodes is not None and int(base_num_nodes) > skip_threshold:
+            effective_task_uses_induced = False
+            print(
+                "[Induced] Skipping eager node induced subgraph materialization for "
+                f"{dataset}: num_nodes={int(base_num_nodes)} exceeds threshold={skip_threshold}. "
+                "Set data_preparation.dataset.induced_skip_node_threshold <= 0 to force generation."
+            )
+
+    if base_dataset_obj is not None and not effective_task_uses_induced:
+        dataset_obj = base_dataset_obj
+    else:
+        dataset_obj = create_dataset(
+            name=dataset,
+            root=root,
+            task_level=task_level,
+            induced=effective_task_uses_induced,
+            induced_min_size=induced_min_size,
+            induced_max_size=induced_max_size,
+            induced_max_hops=induced_max_hops,
+            induced_root=dataset_induced_root,
+            split_root=dataset_split_root,
+            split=split_for_dataset,
+            seed=primary_seed,
+            feat_reduction=feat_reduction,
+            feat_reduction_dim=feat_reduction_dim,
+            feature_svd_dir=dataset_feature_svd_dir,
+        )
     if task_level == "node":
         _log_node_dataset_overview(dataset=dataset, dataset_obj=dataset_obj)
     elif task_level == "graph":
@@ -843,25 +1002,28 @@ def _process_non_edge_task(
 
     if effective_split_defs:
         split_dataset_obj = dataset_obj
-        if task_uses_induced:
+        if effective_task_uses_induced:
             # Split indices should be produced from the base (non-induced) graph.
-            with contextlib.redirect_stdout(io.StringIO()):
-                split_dataset_obj = create_dataset(
-                    name=dataset,
-                    root=root,
-                    task_level=task_level,
-                    induced=False,
-                    induced_min_size=induced_min_size,
-                    induced_max_size=induced_max_size,
-                    induced_max_hops=induced_max_hops,
-                    induced_root=dataset_induced_root,
-                    split_root=dataset_split_root,
-                    split=None,
-                    seed=primary_seed,
-                    feat_reduction=feat_reduction,
-                    feat_reduction_dim=feat_reduction_dim,
-                    feature_svd_dir=dataset_feature_svd_dir,
-                )
+            if base_dataset_obj is not None:
+                split_dataset_obj = base_dataset_obj
+            else:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    split_dataset_obj = create_dataset(
+                        name=dataset,
+                        root=root,
+                        task_level=task_level,
+                        induced=False,
+                        induced_min_size=induced_min_size,
+                        induced_max_size=induced_max_size,
+                        induced_max_hops=induced_max_hops,
+                        induced_root=dataset_induced_root,
+                        split_root=dataset_split_root,
+                        split=None,
+                        seed=primary_seed,
+                        feat_reduction=feat_reduction,
+                        feat_reduction_dim=feat_reduction_dim,
+                        feature_svd_dir=dataset_feature_svd_dir,
+                    )
         split_failures = _generate_task_splits(
             dataset_obj=split_dataset_obj,
             dataset_name=dataset,
@@ -880,7 +1042,7 @@ def _process_non_edge_task(
         feat_reduction_dim=feat_reduction_dim,
         feature_svd_dir=dataset_feature_svd_dir,
     )
-    should_run_subgraph_svd = subgraph_svd and (task_uses_induced or task_level == "graph")
+    should_run_subgraph_svd = subgraph_svd and (effective_task_uses_induced or task_level == "graph")
     if should_run_subgraph_svd:
         _compute_subgraph_svd_with_fallback(
             dataset_obj,
@@ -906,6 +1068,8 @@ def try_load(
     induced_min_size: int = 10,
     induced_max_size: int = 30,
     induced_max_hops: int = 5,
+    induced_skip_node_threshold: int | None = None,
+    edge_level_max_num_nodes: int | None = None,
     induced_root: str = "",
     subgraph_svd: bool = False,
     subgraph_svd_feat_dim: int = 100,
@@ -920,6 +1084,7 @@ def try_load(
 ) -> bool:
     """Prepare one dataset for all requested task levels."""
     root_path = Path(root)
+    normalized_task_levels = tuple(str(level) for level in task_levels)
     dataset_split_root = _dataset_scoped_dir(split_root, dataset)
     dataset_feature_svd_dir = _dataset_scoped_dir(feature_svd_dir, dataset)
     dataset_induced_root = _dataset_scoped_dir(induced_root, dataset) if induced_root else ""
@@ -932,11 +1097,22 @@ def try_load(
     normalized_split_seeds = [int(seed) for seed in (split_seeds or [])]
     if not normalized_split_seeds:
         normalized_split_seeds = [42]
+    skip_edge_task = (
+        "edge" in normalized_task_levels
+        and infer_task_level(dataset) == "node"
+        and not _should_prepare_edge_level_for_node_dataset(
+            dataset,
+            root,
+            node_limit=edge_level_max_num_nodes,
+        )
+    )
 
     all_ok = True
-    for task_level in task_levels:
+    for task_level in normalized_task_levels:
+        if task_level == "edge" and skip_edge_task:
+            continue
         print(TASK_SEPARATOR)
-        print(f"[DataPrep] Processing {dataset} (task={task_level})...")
+        print(f"[DataPrep] Processing {dataset} (task level={task_level})...")
         print(TASK_SEPARATOR)
         task_split_defs = list(split_defs_map.get(task_level, []))
         try:
@@ -987,6 +1163,7 @@ def try_load(
                         induced_min_size=induced_min_size,
                         induced_max_size=induced_max_size,
                         induced_max_hops=induced_max_hops,
+                        induced_skip_node_threshold=induced_skip_node_threshold,
                         feat_reduction=feat_reduction,
                         feat_reduction_dim=feat_reduction_dim,
                         subgraph_svd=subgraph_svd,
@@ -997,14 +1174,14 @@ def try_load(
                 )
         except Exception as exc:  # pylint: disable=broad-except
             all_ok = False
-            print(f"[FAIL] {dataset} (task={task_level}): {exc}")
+            print(f"[FAIL] {dataset} (task level={task_level}): {exc}")
             continue
 
         if not task_ok:
             all_ok = False
-            print(f"[FAIL] {dataset} (task={task_level}): preparation completed with failures.")
+            print(f"[FAIL] {dataset} (task level={task_level}): preparation completed with failures.")
             continue
-        print(f"[OK] {dataset} (task={task_level})")
+        print(f"[OK] {dataset} (task level={task_level})")
     return all_ok
 
 
@@ -1019,6 +1196,8 @@ def prepare_datasets(
     induced_min_size: int = 10,
     induced_max_size: int = 30,
     induced_max_hops: int = 5,
+    induced_skip_node_threshold: int | None = None,
+    edge_level_max_num_nodes: int | None = None,
     induced_root: str = "",
     subgraph_svd: bool = False,
     subgraph_svd_feat_dim: int = 100,
@@ -1066,6 +1245,8 @@ def prepare_datasets(
             induced_min_size=induced_min_size,
             induced_max_size=induced_max_size,
             induced_max_hops=induced_max_hops,
+            induced_skip_node_threshold=induced_skip_node_threshold,
+            edge_level_max_num_nodes=edge_level_max_num_nodes,
             induced_root=induced_root,
             subgraph_svd=subgraph_svd,
             subgraph_svd_feat_dim=subgraph_svd_feat_dim,
