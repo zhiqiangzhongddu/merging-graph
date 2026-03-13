@@ -24,7 +24,7 @@ fi
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
 
 # Activate conda environment (defaults to agae). Override CONDA_BASE or CONDA_ENV if needed.
-CONDA_BASE="${CONDA_BASE:-/project/home/p200709/conda_base_path/miniconda3}"
+CONDA_BASE="${CONDA_BASE:-/project/home/p201211/conda_base_path/miniconda3}"
 if [ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]; then
   . "${CONDA_BASE}/etc/profile.d/conda.sh"
 elif command -v conda >/dev/null 2>&1; then
