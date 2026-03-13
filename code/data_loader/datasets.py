@@ -1,8 +1,6 @@
 import csv
 import hashlib
-import contextlib
 from numbers import Integral
-import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 import re
@@ -14,7 +12,7 @@ import torch
 from torch.utils.data import Dataset, Subset
 from torch_geometric.data import Data
 from torch_geometric.data import InMemoryDataset
-from torch_geometric.data.data import DataEdgeAttr  # type: ignore
+from torch_geometric.data.data import DataEdgeAttr
 from torch_geometric.datasets import (
     Actor,
     Airports,
@@ -50,6 +48,8 @@ from torch_geometric.loader import DataLoader, LinkNeighborLoader
 from torch_geometric.transforms import Compose
 from torch_geometric.utils import degree, k_hop_subgraph, negative_sampling, subgraph
 from torch_geometric.utils.smiles import from_smiles
+from ogb.nodeproppred import PygNodePropPredDataset
+from ogb.graphproppred import PygGraphPropPredDataset
 
 from code.utils import ensure_dir, format_split_for_name
 from .dataset_domains import (
@@ -71,121 +71,45 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-# Ensure torch.load works with PyG Data under torch 2.6+ defaults.
-import torch.serialization as ts  # type: ignore
-
-os.environ.setdefault("TORCH_LOAD_WEIGHTS_ONLY", "0")
-os.environ.setdefault("OGB_ASSUME_YES", "1")
-if hasattr(ts, "add_safe_globals"):
-    try:
-        extras = [Data]
-        if DataEdgeAttr is not None:
-            extras.append(DataEdgeAttr)
-        ts.add_safe_globals(extras)
-    except Exception:
-        pass
-# Force weights_only=False globally when available (torch>=2.6)
-try:
-    import inspect
-
-    _orig_torch_load = torch.load
-    if "weights_only" in inspect.signature(_orig_torch_load).parameters:
-        def _torch_load_no_weights_only(*args, **kwargs):
-            kwargs.setdefault("weights_only", False)
-            return _orig_torch_load(*args, **kwargs)
-        torch.load = _torch_load_no_weights_only
-except Exception:
-    pass
-
-# Compatibility loader to handle Torch 2.6+ weights_only default.
-def _safe_torch_load(path):
-    try:
-        return torch.load(path, weights_only=False)
-    except TypeError:
-        return torch.load(path)
-
-
-def _get_dataset_data_storage(dataset):
-    """
-    Return underlying dataset-level Data storage without triggering PyG warnings.
-
-    For InMemoryDataset, use `_data` directly instead of `data` to avoid:
-    "It is not recommended to directly access the internal storage format `data`..."
-    """
-    # Prefer direct internal storage access for PyG InMemoryDataset to avoid
-    # triggering the `dataset.data` deprecation warning.
-    if InMemoryDataset is not None and isinstance(dataset, InMemoryDataset):
-        return dataset.__dict__.get("_data", None)
-
-    if "_data" in getattr(dataset, "__dict__", {}):
-        return dataset.__dict__.get("_data", None)
-
-    return getattr(dataset, "data", None)
-
-
-def _set_dataset_data_storage(dataset, data_obj) -> None:
-    """Set dataset-level Data storage using `_data` when available."""
-    if InMemoryDataset is not None and isinstance(dataset, InMemoryDataset):
-        dataset.__dict__["_data"] = data_obj
-        return
-
-    if "_data" in getattr(dataset, "__dict__", {}):
-        dataset.__dict__["_data"] = data_obj
-        return
-    setattr(dataset, "data", data_obj)
-
-
-@contextlib.contextmanager
-def _force_ogb_prompts_yes():
-    """Force OGB download/version prompts to auto-yes."""
-    import builtins
-    try:
-        import ogb.utils.url as ogb_url
-    except Exception:
-        ogb_url = None
-
-    orig_input = builtins.input
-    orig_decide = getattr(ogb_url, "decide_download", None) if ogb_url else None
-    builtins.input = lambda *args, **kwargs: "y"
-    if ogb_url and orig_decide:
-        ogb_url.decide_download = lambda url: True
-    try:
-        yield
-    finally:
-        builtins.input = orig_input
-        if ogb_url and orig_decide:
-            ogb_url.decide_download = orig_decide
-
 
 # Note: we don't touch any dynamic, 3D, relational or heterogeneous datasets in this project.
 
 # -------------------------------------------------------------------------- #
 # Node-level datasets
 # -------------------------------------------------------------------------- #
-Actor_NAMES = {"actor"}
-Airports_NAMES = {"airports": "USA"}
+Actor_NAMES = {
+    "actor": "actor",
+}
+Airports_NAMES = {
+    "airports": "USA",
+}
 Amazon_NAMES = {
     "computers": "Computers",
     "photo": "Photo",
 }
 CitationFull_NAMES = {
-    "cora_ml",
-    "dblp",
+    "cora_ml": "cora_ml",
+    "dblp": "dblp",
 }
 Coauthor_NAMES = {
     "cs": "CS",
     "physics": "Physics",
 }
-CoraFull_NAMES = {"corafull"}
-EllipticBitcoinDataset_NAMES = {"elliptic_bitcoin"}
+CoraFull_NAMES = {
+    "corafull": "corafull",
+}
+EllipticBitcoinDataset_NAMES = {
+    "elliptic_bitcoin": "elliptic_bitcoin",
+}
 EmailEUCore_NAMES = {
     "email": "email_eu_core",
     "email_eu_core": "email_eu_core",
     "email-eu-core": "email_eu_core",
 }
-# Disabled datasets (source URLs currently 404).
 # FacebookPagePage_NAMES = {"facebook_page-page"}
-Flickr_NAMES = {"flickr"}
+Flickr_NAMES = {
+    "flickr": "flickr",
+}
 # GemsecDeezer_NAMES = {"gemsec_deezer_hu": "HU", "gemsec_deezer_hr": "HR", "gemsec_deezer_ro": "RO"}
 # GitHub_NAMES = {}
 HeterophilousGraphDataset_NAMES = {
@@ -197,12 +121,12 @@ HeterophilousGraphDataset_NAMES = {
 }
 # LastFMAsia_NAMES = {}
 LINKXDataset_NAMES = {
-    "amherst41",
-    "cornell5",
-    "genius",
-    "johnshopkins55",
-    "penn94",
-    "reed98",
+    "amherst41": "amherst41",
+    "cornell5": "cornell5",
+    "genius": "genius",
+    "johnshopkins55": "johnshopkins55",
+    "penn94": "penn94",
+    "reed98": "reed98",
 }
 # LRGB_NODE_NAMES = {
 #     "coco-sp": "COCO-SP",
@@ -215,20 +139,36 @@ LINKXDataset_NAMES = {
 #     "peptides-func": "Peptides-func",
 #     "peptides-struct": "Peptides-struct",
 # }
+OGB_NAMES = {
+    "ogbn-arxiv": "ogbn-arxiv",
+    "ogbn-mag": "ogbn-mag",
+    "ogbg-molhiv": "ogbg-molhiv",
+    "ogbg-molpcba": "ogbg-molpcba",
+    "ogbn-papers100m": "ogbn-papers100M",
+    "ogbn-products": "ogbn-products",
+}
 Planetoid_NAMES = {
     "citeseer": "CiteSeer",
     "cora": "Cora",
     "pubmed": "PubMed",
 }
-Reddit_NAMES = {"reddit"}
-Reddit2_NAMES = {"reddit2"}
+Reddit_NAMES = {
+    "reddit": "reddit",
+}
+Reddit2_NAMES = {
+    "reddit2": "reddit2",
+}
 # Twitch_NAMES = {"twitch-de": "DE", ...}
-WebKB_NAMES = {"cornell", "texas", "wisconsin"}
+WebKB_NAMES = {
+    "cornell": "cornell", 
+    "texas": "texas", 
+    "wisconsin": "wisconsin",
+}
 WikiCS_NAMES = {"wikics"}
 WikipediaNetwork_NAMES = {
-    "chameleon",
-    # "crocodile",
-    "squirrel",
+    "chameleon": "chameleon",
+    # "crocodile": "crocodile",
+    "squirrel": "squirrel",
 }
 
 # -------------------------------------------------------------------------- #
@@ -236,21 +176,25 @@ WikipediaNetwork_NAMES = {
 # -------------------------------------------------------------------------- #
 # Core molecule/graph benchmarks
 MoleculeNet_NAMES = {
-    "bace",
-    "bbbp",
-    "clintox",
-    "esol",
-    "freesolv",
-    "hiv",
-    "lipo",
-    "muv",
-    "pcba",
-    "sider",
-    "tox21",
-    "toxcast",
+    "bace": "bace",
+    "bbbp": "bbbp",
+    "clintox": "clintox",
+    "esol": "esol",
+    "freesolv": "freesolv",
+    "hiv": "hiv",
+    "lipo": "lipo",
+    "muv": "muv",
+    "pcba": "pcba",
+    "sider": "sider",
+    "tox21": "tox21",
+    "toxcast": "toxcast",
 }
-QM7b_NAMES = {"qm7b"}
-QM9_NAMES = {"qm9"}
+QM7b_NAMES = {
+    "qm7b": "qm7b",
+}
+QM9_NAMES = {
+    "qm9": "qm9",
+}
 TUDataset_NAMES = {
     "collab": "COLLAB",
     "enzymes": "ENZYMES",
@@ -269,8 +213,12 @@ GNNBenchmarkDataset_NAMES = {
     "mnist": "MNIST",
     "cifar10": "CIFAR10",
 }
-ZINC_NAMES = {"zinc"}
-ZINC15_NAMES = {"zinc15"}
+ZINC_NAMES = {
+    "zinc": "zinc",
+}
+ZINC15_NAMES = {
+    "zinc15": "zinc15"
+}
 
 
 def _is_node_dataset_key(key: str) -> bool:
@@ -316,6 +264,44 @@ def _is_edge_dataset_key(key: str) -> bool:
         key.startswith("ogbl-")
         # or key in LRGB_EDGE_NAMES
     )
+
+
+# Compatibility loader to handle Torch 2.6+ weights_only default.
+def _safe_torch_load(path):
+    try:
+        return torch.load(path, weights_only=False)
+    except TypeError:
+        return torch.load(path)
+
+
+def _get_dataset_data_storage(dataset):
+    """
+    Return underlying dataset-level Data storage without triggering PyG warnings.
+
+    For InMemoryDataset, use `_data` directly instead of `data` to avoid:
+    "It is not recommended to directly access the internal storage format `data`..."
+    """
+    # Prefer direct internal storage access for PyG InMemoryDataset to avoid
+    # triggering the `dataset.data` deprecation warning.
+    if InMemoryDataset is not None and isinstance(dataset, InMemoryDataset):
+        return dataset.__dict__.get("_data", None)
+
+    if "_data" in getattr(dataset, "__dict__", {}):
+        return dataset.__dict__.get("_data", None)
+
+    return getattr(dataset, "data", None)
+
+
+def _set_dataset_data_storage(dataset, data_obj) -> None:
+    """Set dataset-level Data storage using `_data` when available."""
+    if InMemoryDataset is not None and isinstance(dataset, InMemoryDataset):
+        dataset.__dict__["_data"] = data_obj
+        return
+
+    if "_data" in getattr(dataset, "__dict__", {}):
+        dataset.__dict__["_data"] = data_obj
+        return
+    setattr(dataset, "data", data_obj)
 
 
 def infer_task_level(name: str) -> str | None:
@@ -1630,26 +1616,72 @@ def _load_node_dataset(
 
     key = name.lower()
     if key in Actor_NAMES:
-        return Actor(_scoped_root(root, "actor"), transform=transform)
+        return Actor(
+            root=_scoped_root(root, "actor"), 
+            transform=transform
+        )
     elif key in Airports_NAMES:
         dataset_key = Airports_NAMES[key]
-        return Airports(_scoped_root(root, key), dataset_key, transform=transform)
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return Airports(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     elif key in Amazon_NAMES:
-        return Amazon(_scoped_root(root, key), Amazon_NAMES[key], transform=transform)
+        dataset_key = Amazon_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return Amazon(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     elif key in CitationFull_NAMES:
-        return CitationFull(_scoped_root(root, key), key, transform=transform)
+        dataset_key = CitationFull_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return CitationFull(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     elif key in Coauthor_NAMES:
-        return Coauthor(_scoped_root(root, key), Coauthor_NAMES[key], transform=transform)
+        dataset_key = Coauthor_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return Coauthor(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     elif key in CoraFull_NAMES:
-        return CoraFull(_scoped_root(root, key), transform=transform)
+        dataset_key = CoraFull_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return CoraFull(
+            root=root_key, 
+            transform=transform
+        )
     elif key in EllipticBitcoinDataset_NAMES:
-        return EllipticBitcoinDataset(_scoped_root(root, "elliptic_bitcoin"), transform=transform)
+        dataset_key = EllipticBitcoinDataset_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return EllipticBitcoinDataset(
+            root=root_key, 
+            transform=transform
+        )
     elif key in EmailEUCore_NAMES:
-        return EmailEUCore(_scoped_root(root, "email"), transform=transform)
+        dataset_key = EmailEUCore_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return EmailEUCore(
+            root=root_key, 
+            transform=transform
+        )
     # elif key in FacebookPagePage_NAMES:
     #     return FacebookPagePage(_scoped_root(root, "facebook_page-page"), transform=transform)
     elif key in Flickr_NAMES:
-        return Flickr(_scoped_root(root, "flickr"), transform=transform)
+        dataset_key = Flickr_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return Flickr(
+            root=root_key, 
+            transform=transform
+        )
     # elif key in GemsecDeezer_NAMES:
     #     dataset_key = GemsecDeezer_NAMES[key]
     #     return GemsecDeezer(_scoped_root(root, "GemsecDeezer"), dataset_key, transform=transform)
@@ -1657,40 +1689,79 @@ def _load_node_dataset(
     #     return GitHub(_scoped_root(root, "GitHub"), transform=transform)
     elif key in HeterophilousGraphDataset_NAMES:
         dataset_key = HeterophilousGraphDataset_NAMES[key]
-        return HeterophilousGraphDataset(_scoped_root(root, key), dataset_key, transform=transform)
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return HeterophilousGraphDataset(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     # elif key in LastFMAsia_NAMES:
     #     return LastFMAsia(_scoped_root(root, "LastFMAsia"), transform=transform)
     elif key in LINKXDataset_NAMES:
-        return LINKXDataset(_scoped_root(root, key), key, transform=transform)
+        dataset_key = LINKXDataset_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return LINKXDataset(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     # elif key in LRGB_NODE_NAMES or key in LRGB_EDGE_NAMES:
     #     dataset_key = LRGB_NODE_NAMES.get(key) or LRGB_EDGE_NAMES[key]
     #     return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in Planetoid_NAMES:
+        dataset_key = Planetoid_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return Planetoid(
-            _scoped_root(root, key),
-            Planetoid_NAMES[key],
+            root=root_key,
+            name=dataset_key,
             transform=transform,
         )
     elif key in Reddit_NAMES:
-        return Reddit(_scoped_root(root, "reddit"), transform=transform)
+        dataset_key = Reddit_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return Reddit(
+            root=root_key, 
+            transform=transform
+        )
     elif key in Reddit2_NAMES:
-        return Reddit2(_scoped_root(root, "reddit2"), transform=transform)
+        dataset_key = Reddit2_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return Reddit2(
+            root=root_key, 
+            transform=transform
+        )
     # elif key in Twitch_NAMES:
     #     dataset_key = Twitch_NAMES[key]
     #     return Twitch(_scoped_root(root, "Twitch"), dataset_key, transform=transform)
     elif key.startswith("ogbn-"):
-        try:
-            from ogb.nodeproppred import PygNodePropPredDataset
-        except ImportError as exc:
-            raise ImportError("Please install ogb to load ogbn-* datasets.") from exc
-        with _force_ogb_prompts_yes():
-            return PygNodePropPredDataset(name=key, root=_scoped_root(root, key), transform=transform)
+        return PygNodePropPredDataset(
+            name=OGB_NAMES[key], 
+            root=_scoped_root(root, key)
+        )
     elif key in WebKB_NAMES:
-        return WebKB(_scoped_root(root, key), key, transform=transform)
+        dataset_key = WebKB_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return WebKB(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     elif key in WikiCS_NAMES:
-        return WikiCS(_scoped_root(root, "wikics"), is_undirected=True, transform=transform)
+        dataset_key = WikiCS_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return WikiCS(
+            root=root_key, 
+            is_undirected=True, 
+            transform=transform
+        )
     elif key in WikipediaNetwork_NAMES:
-        return WikipediaNetwork(_scoped_root(root, key), key, transform=transform)
+        dataset_key = WikipediaNetwork_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
+        return WikipediaNetwork(
+            root=root_key, 
+            name=dataset_key, 
+            transform=transform
+        )
     else:
         raise ValueError(f"Unsupported node-level dataset: {name}")
 
@@ -1704,34 +1775,57 @@ def _load_graph_dataset(
 
     key = name.lower()
     if key in MoleculeNet_NAMES:
-        return MoleculeNet(_scoped_root(root, key), key, transform=transform)
+        return MoleculeNet(
+            root=_scoped_root(root, key), 
+            name=key, 
+            transform=transform
+        )
     elif key in GNNBenchmarkDataset_NAMES:
-        dataset_key = GNNBenchmarkDataset_NAMES[key]
-        return GNNBenchmarkDataset(_scoped_root(root, key), dataset_key, transform=transform)
+        return GNNBenchmarkDataset(
+            root=_scoped_root(root, key), 
+            name=GNNBenchmarkDataset_NAMES[key], 
+            transform=transform
+        )
     # elif key in LRGB_GRAPH_NAMES:
     #     dataset_key = LRGB_GRAPH_NAMES[key]
     #     return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in QM7b_NAMES:
-        return QM7b(_scoped_root(root, key), transform=transform)
+        return QM7b(
+            root=_scoped_root(root, key), 
+            transform=transform
+        )
     elif key in QM9_NAMES:
-        return QM9(_scoped_root(root, key), transform=transform)
+        return QM9(
+            root=_scoped_root(root, key), 
+            transform=transform
+        )
     elif key in ZINC15_NAMES:
-        return ZINC15Dataset(root=root, transform=transform)
+        return ZINC15Dataset(
+            root=_scoped_root(root, key), 
+            transform=transform
+        )
     elif key in ZINC_NAMES:
-        return ZINC(_scoped_root(root, "zinc"), subset=False, split="train", transform=transform)
+        return ZINC(
+            root=_scoped_root(root, "zinc"), 
+            subset=False, 
+            split="train", 
+            transform=transform
+        )
     elif key in TUDataset_NAMES:
         dataset_key = TUDataset_NAMES[key]
         # Ensure nested raw dir exists to avoid fs.ls errors when download checks for files
         base = Path(root) / key
         (base / "raw" / dataset_key).mkdir(parents=True, exist_ok=True)
-        return TUDataset(_scoped_root(root, key), dataset_key, transform=transform)
+        return TUDataset(
+            root=_scoped_root(root, key), 
+            name=dataset_key, 
+            transform=transform
+        )
     elif key.startswith("ogbg-"):
-        try:
-            from ogb.graphproppred import PygGraphPropPredDataset
-        except ImportError as exc:
-            raise ImportError("Please install ogb to load ogbg-* datasets.") from exc
-        with _force_ogb_prompts_yes():
-            return PygGraphPropPredDataset(name=key, root=_scoped_root(root, key), transform=transform)
+        return PygGraphPropPredDataset(
+            name=OGB_NAMES[key], 
+            root=_scoped_root(root, key)
+        )
     else:
         raise ValueError(f"Unsupported graph-level dataset: {name}")
 
