@@ -1,3 +1,4 @@
+import contextlib
 import csv
 import hashlib
 from numbers import Integral
@@ -12,7 +13,6 @@ import torch
 from torch.utils.data import Dataset, Subset
 from torch_geometric.data import Data
 from torch_geometric.data import InMemoryDataset
-from torch_geometric.data.data import DataEdgeAttr
 from torch_geometric.datasets import (
     Actor,
     Airports,
@@ -57,6 +57,7 @@ from .dataset_domains import (
     KEYWORD_DOMAINS,
     NAME_TO_DOMAIN,
 )
+
 
 # Keep logs clean when third-party internals still touch InMemoryDataset.data.
 warnings.filterwarnings(
@@ -264,6 +265,29 @@ def _is_edge_dataset_key(key: str) -> bool:
         key.startswith("ogbl-")
         # or key in LRGB_EDGE_NAMES
     )
+
+
+# Dataset-level prompt handling for OGB datasets that require user confirmation for downloading or version updates.
+@contextlib.contextmanager
+def _force_ogb_prompts_yes():
+    """Force OGB download/version prompts to auto-yes."""
+    import builtins
+    try:
+        import ogb.utils.url as ogb_url
+    except Exception:
+        ogb_url = None
+
+    orig_input = builtins.input
+    orig_decide = getattr(ogb_url, "decide_download", None) if ogb_url else None
+    builtins.input = lambda *args, **kwargs: "y"
+    if ogb_url and orig_decide:
+        ogb_url.decide_download = lambda url: True
+    try:
+        yield
+    finally:
+        builtins.input = orig_input
+        if ogb_url and orig_decide:
+            ogb_url.decide_download = orig_decide
 
 
 # Compatibility loader to handle Torch 2.6+ weights_only default.
@@ -1714,7 +1738,7 @@ def _load_node_dataset(
         return Planetoid(
             root=root_key,
             name=dataset_key,
-            transform=transform,
+            transform=transform
         )
     elif key in Reddit_NAMES:
         dataset_key = Reddit_NAMES[key]
@@ -1734,10 +1758,13 @@ def _load_node_dataset(
     #     dataset_key = Twitch_NAMES[key]
     #     return Twitch(_scoped_root(root, "Twitch"), dataset_key, transform=transform)
     elif key.startswith("ogbn-"):
-        return PygNodePropPredDataset(
-            name=OGB_NAMES[key], 
-            root=_scoped_root(root, key)
-        )
+        dataset_key = OGB_NAMES[key]
+        root_key = _scoped_root(root, key)
+        with _force_ogb_prompts_yes():
+            return PygNodePropPredDataset(
+                name=dataset_key, 
+                root=root_key,
+            )
     elif key in WebKB_NAMES:
         dataset_key = WebKB_NAMES[key]
         root_key = _scoped_root(root, key) if key != dataset_key else root
@@ -1822,10 +1849,13 @@ def _load_graph_dataset(
             transform=transform
         )
     elif key.startswith("ogbg-"):
-        return PygGraphPropPredDataset(
-            name=OGB_NAMES[key], 
-            root=_scoped_root(root, key)
-        )
+        dataset_key = OGB_NAMES[key]
+        root_key = _scoped_root(root, key)
+        with _force_ogb_prompts_yes():
+            return PygGraphPropPredDataset(
+                name=dataset_key, 
+                root=root_key
+            )
     else:
         raise ValueError(f"Unsupported graph-level dataset: {name}")
 
