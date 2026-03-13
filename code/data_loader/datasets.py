@@ -104,8 +104,6 @@ EllipticBitcoinDataset_NAMES = {
 }
 EmailEUCore_NAMES = {
     "email": "email_eu_core",
-    "email_eu_core": "email_eu_core",
-    "email-eu-core": "email_eu_core",
 }
 # FacebookPagePage_NAMES = {"facebook_page-page"}
 Flickr_NAMES = {
@@ -1685,7 +1683,7 @@ def _load_node_dataset(
         )
     elif key in EllipticBitcoinDataset_NAMES:
         dataset_key = EllipticBitcoinDataset_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return EllipticBitcoinDataset(
             root=root_key, 
             transform=transform
@@ -1741,15 +1739,13 @@ def _load_node_dataset(
             transform=transform
         )
     elif key in Reddit_NAMES:
-        dataset_key = Reddit_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return Reddit(
             root=root_key, 
             transform=transform
         )
     elif key in Reddit2_NAMES:
-        dataset_key = Reddit2_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return Reddit2(
             root=root_key, 
             transform=transform
