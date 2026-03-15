@@ -112,11 +112,11 @@ Flickr_NAMES = {
 # GemsecDeezer_NAMES = {"gemsec_deezer_hu": "HU", "gemsec_deezer_hr": "HR", "gemsec_deezer_ro": "RO"}
 # GitHub_NAMES = {}
 HeterophilousGraphDataset_NAMES = {
-    "amazon-ratings": "Amazon-ratings",
-    "minesweeper": "Minesweeper",
-    "questions": "Questions",
-    "roman-empire": "Roman-empire",
-    "tolokers": "Tolokers",
+    "amazon-ratings": "amazon_ratings",
+    "minesweeper": "minesweeper",
+    "questions": "questions",
+    "roman-empire": "roman_empire",
+    "tolokers": "tolokers",
 }
 # LastFMAsia_NAMES = {}
 LINKXDataset_NAMES = {
@@ -138,13 +138,16 @@ LINKXDataset_NAMES = {
 #     "peptides-func": "Peptides-func",
 #     "peptides-struct": "Peptides-struct",
 # }
-OGB_NAMES = {
-    "ogbn-arxiv": "ogbn-arxiv",
-    "ogbn-mag": "ogbn-mag",
+OGBG_NAMES = {
     "ogbg-molhiv": "ogbg-molhiv",
     "ogbg-molpcba": "ogbg-molpcba",
+}
+OGBN_NAMES = {
+    "ogbn-arxiv": "ogbn-arxiv",
+    "ogbn-mag": "ogbn-mag",
     "ogbn-papers100m": "ogbn-papers100M",
     "ogbn-products": "ogbn-products",
+    "ogbn-proteins": "ogbn-proteins",
 }
 Planetoid_NAMES = {
     "citeseer": "CiteSeer",
@@ -163,7 +166,9 @@ WebKB_NAMES = {
     "texas": "texas", 
     "wisconsin": "wisconsin",
 }
-WikiCS_NAMES = {"wikics"}
+WikiCS_NAMES = {
+    "wikics": "wikics",
+}
 WikipediaNetwork_NAMES = {
     "chameleon": "chameleon",
     # "crocodile": "crocodile",
@@ -200,7 +205,7 @@ TUDataset_NAMES = {
     "imdb-binary": "IMDB-BINARY",
     "imdb-multi": "IMDB-MULTI",
     "mutag": "MUTAG",
-    "ppi": "PPI",
+    # "ppi": "PPI",
     "proteins": "PROTEINS",
     "nci1": "NCI1",
     "nci109": "NCI109",
@@ -1676,7 +1681,7 @@ def _load_node_dataset(
         )
     elif key in CoraFull_NAMES:
         dataset_key = CoraFull_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return CoraFull(
             root=root_key, 
             transform=transform
@@ -1699,7 +1704,7 @@ def _load_node_dataset(
     #     return FacebookPagePage(_scoped_root(root, "facebook_page-page"), transform=transform)
     elif key in Flickr_NAMES:
         dataset_key = Flickr_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return Flickr(
             root=root_key, 
             transform=transform
@@ -1754,7 +1759,7 @@ def _load_node_dataset(
     #     dataset_key = Twitch_NAMES[key]
     #     return Twitch(_scoped_root(root, "Twitch"), dataset_key, transform=transform)
     elif key.startswith("ogbn-"):
-        dataset_key = OGB_NAMES[key]
+        dataset_key = OGBN_NAMES[key]
         root_key = _scoped_root(root, key)
         with _force_ogb_prompts_yes():
             return PygNodePropPredDataset(
@@ -1771,7 +1776,7 @@ def _load_node_dataset(
         )
     elif key in WikiCS_NAMES:
         dataset_key = WikiCS_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return WikiCS(
             root=root_key, 
             is_undirected=True, 
@@ -1798,54 +1803,64 @@ def _load_graph_dataset(
 
     key = name.lower()
     if key in MoleculeNet_NAMES:
+        dataset_key = MoleculeNet_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return MoleculeNet(
-            root=_scoped_root(root, key), 
-            name=key, 
+            root=root_key, 
+            name=dataset_key, 
             transform=transform
         )
     elif key in GNNBenchmarkDataset_NAMES:
+        dataset_key = GNNBenchmarkDataset_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return GNNBenchmarkDataset(
-            root=_scoped_root(root, key), 
-            name=GNNBenchmarkDataset_NAMES[key], 
+            root=root_key, 
+            name=dataset_key, 
             transform=transform
         )
     # elif key in LRGB_GRAPH_NAMES:
     #     dataset_key = LRGB_GRAPH_NAMES[key]
     #     return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in QM7b_NAMES:
+        dataset_key = QM7b_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return QM7b(
-            root=_scoped_root(root, key), 
+            root=root_key, 
             transform=transform
         )
     elif key in QM9_NAMES:
+        dataset_key = QM9_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return QM9(
-            root=_scoped_root(root, key), 
+            root=root_key, 
             transform=transform
         )
     elif key in ZINC15_NAMES:
+        dataset_key = ZINC15_NAMES[key]
+        root_key = root
         return ZINC15Dataset(
-            root=_scoped_root(root, key), 
+            root=root_key, 
             transform=transform
         )
     elif key in ZINC_NAMES:
+        dataset_key = ZINC_NAMES[key]
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return ZINC(
-            root=_scoped_root(root, "zinc"), 
+            root=root_key, 
             subset=False, 
             split="train", 
             transform=transform
         )
     elif key in TUDataset_NAMES:
         dataset_key = TUDataset_NAMES[key]
-        # Ensure nested raw dir exists to avoid fs.ls errors when download checks for files
-        base = Path(root) / key
-        (base / "raw" / dataset_key).mkdir(parents=True, exist_ok=True)
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return TUDataset(
-            root=_scoped_root(root, key), 
+            root=root_key, 
             name=dataset_key, 
             transform=transform
         )
     elif key.startswith("ogbg-"):
-        dataset_key = OGB_NAMES[key]
+        dataset_key = OGBG_NAMES[key]
         root_key = _scoped_root(root, key)
         with _force_ogb_prompts_yes():
             return PygGraphPropPredDataset(
