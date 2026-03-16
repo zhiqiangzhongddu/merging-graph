@@ -29,7 +29,7 @@ pip install torch-cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.1.1+cu118.h
 - Default dataset root: `data/datasets` (override with `data_preparation.dataset.root`).
 - Node- and edge-level dataset list: `data/available_node_datasets.tsv`.
 - Graph-level dataset list: `data/available_graph_datasets.tsv`.
-- Total available datasets: `69`.
+- Total available datasets: `63`.
 - `run_data_preparation.py` handles download, preprocessing, split generation, feature SVD, induced subgraphs, and subgraph SVD (based on config). It also generates a dataset summary at `data/data_summary.tsv` for the datasets prepared in that run.
 
 ```bash
@@ -125,12 +125,29 @@ Supported 7 pretraining methods:
 Run a single pre-training job from the project root:
 ```bash
 # attr_masking / context_pred / dgi / edge_pred / graphcl / infograph
+# zinc
 python run_pretrain.py \
-  model.name gcn \
-  pretrain.dataset.name cora \
-  pretrain.dataset.task_level node \
-  pretrain.dataset.induced True \
+  model.name gin \
+  pretrain.dataset.name zinc \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.feat_reduction False \
+  pretrain.dataset.induced False \
   pretrain.method edge_pred \
+  pretrain.epochs 100 \
+  pretrain.early_stopping 100 \
+  pretrain.batch_size 256 \
+  device 0
+# zinc15
+python run_pretrain.py \
+  model.name gin \
+  pretrain.dataset.name zinc15 \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.feat_reduction False \
+  pretrain.dataset.induced False \
+  pretrain.method edge_pred \
+  pretrain.epochs 100 \
+  pretrain.early_stopping 100 \
+  pretrain.batch_size 512 \
   device 0
 
 # supervised
@@ -168,11 +185,15 @@ python run_finetune.py \
   model.name gin \
   pretrain.dataset.name zinc \
   pretrain.dataset.task_level graph \
+  pretrain.dataset.feat_reduction False \
   pretrain.dataset.induced False \
   pretrain.method edge_pred \
+  pretrain.epochs 100 \
+  pretrain.early_stopping 100 \
+  pretrain.batch_size 256 \
   finetune.dataset.name tox21 \
   finetune.dataset.task_level graph \
-  pretrain.dataset.induced False \
+  finetune.dataset.induced False \
   finetune.method supervised \
   finetune.dataset.fixed_split "(0.8,0.1,0.1)" \
   device 0

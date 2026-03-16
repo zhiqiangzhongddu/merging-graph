@@ -35,8 +35,8 @@ from torch_geometric.datasets import (
     Planetoid,
     QM7b,
     QM9,
-    Reddit,
-    Reddit2,
+    # Reddit,
+    # Reddit2,
     TUDataset,
     # Twitch,
     WebKB,
@@ -48,6 +48,15 @@ from torch_geometric.loader import DataLoader, LinkNeighborLoader
 from torch_geometric.transforms import Compose
 from torch_geometric.utils import degree, k_hop_subgraph, negative_sampling, subgraph
 from torch_geometric.utils.smiles import from_smiles
+
+# OGB pulls in `outdated`, which still imports `pkg_resources.parse_version`.
+# Keep that one third-party deprecation warning out of experiment logs.
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+    module=r"outdated(\..*)?",
+)
 from ogb.nodeproppred import PygNodePropPredDataset
 from ogb.graphproppred import PygGraphPropPredDataset
 
@@ -1743,18 +1752,18 @@ def _load_node_dataset(
             name=dataset_key,
             transform=transform
         )
-    elif key in Reddit_NAMES:
-        root_key = _scoped_root(root, key)
-        return Reddit(
-            root=root_key, 
-            transform=transform
-        )
-    elif key in Reddit2_NAMES:
-        root_key = _scoped_root(root, key)
-        return Reddit2(
-            root=root_key, 
-            transform=transform
-        )
+    # elif key in Reddit_NAMES:
+    #     root_key = _scoped_root(root, key)
+    #     return Reddit(
+    #         root=root_key, 
+    #         transform=transform
+    #     )
+    # elif key in Reddit2_NAMES:
+    #     root_key = _scoped_root(root, key)
+    #     return Reddit2(
+    #         root=root_key, 
+    #         transform=transform
+    #     )
     # elif key in Twitch_NAMES:
     #     dataset_key = Twitch_NAMES[key]
     #     return Twitch(_scoped_root(root, "Twitch"), dataset_key, transform=transform)
