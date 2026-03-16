@@ -29,7 +29,7 @@ pip install torch-cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.1.1+cu118.h
 - Default dataset root: `data/datasets` (override with `data_preparation.dataset.root`).
 - Node- and edge-level dataset list: `data/available_node_datasets.tsv`.
 - Graph-level dataset list: `data/available_graph_datasets.tsv`.
-- Total available datasets: `63`.
+- Total available datasets: `66` (`35` node- and edge-level datasets + `31` graph-level datasets).
 - `run_data_preparation.py` handles download, preprocessing, split generation, feature SVD, induced subgraphs, and subgraph SVD (based on config). It also generates a dataset summary at `data/data_summary.tsv` for the datasets prepared in that run.
 
 ```bash
@@ -130,7 +130,7 @@ python run_pretrain.py \
   model.name gin \
   pretrain.dataset.name zinc \
   pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
+  pretrain.dataset.feat_reduction True \
   pretrain.dataset.induced False \
   pretrain.method edge_pred \
   pretrain.epochs 100 \
@@ -142,7 +142,7 @@ python run_pretrain.py \
   model.name gin \
   pretrain.dataset.name zinc15 \
   pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
+  pretrain.dataset.feat_reduction True \
   pretrain.dataset.induced False \
   pretrain.method edge_pred \
   pretrain.epochs 100 \
