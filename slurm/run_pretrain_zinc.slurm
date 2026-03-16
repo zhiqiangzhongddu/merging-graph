@@ -64,7 +64,7 @@ python "${ROOT_DIR}/run_pretrain.py" \
   model.name gin \
   pretrain.dataset.name zinc \
   pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction False \
+  pretrain.dataset.feat_reduction True \
   pretrain.dataset.induced False \
   pretrain.method "${METHOD}" \
   pretrain.epochs 100 \
