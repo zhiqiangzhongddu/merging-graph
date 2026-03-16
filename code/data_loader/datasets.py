@@ -116,7 +116,7 @@ HeterophilousGraphDataset_NAMES = {
     "minesweeper": "minesweeper",
     "questions": "questions",
     "roman-empire": "roman_empire",
-    "tolokers": "tolokers",
+    # "tolokers": "tolokers", # data processing needs more than 24h
 }
 # LastFMAsia_NAMES = {}
 LINKXDataset_NAMES = {

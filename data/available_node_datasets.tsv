@@ -21,7 +21,7 @@ johnshopkins55
 minesweeper
 ogbn-arxiv
 ogbn-mag
-pgbn-papers100m
+ogbn-papers100m
 ogbn-proteins
 ogbn-products
 penn94
@@ -35,6 +35,5 @@ reed98
 roman-empire
 squirrel
 texas
-tolokers
 wikics
 wisconsin
