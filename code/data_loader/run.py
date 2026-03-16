@@ -269,7 +269,6 @@ def _run_prepare_stage(
         induced_min_size=getattr(ds_cfg, "induced_min_size", 10),
         induced_max_size=getattr(ds_cfg, "induced_max_size", 30),
         induced_max_hops=getattr(ds_cfg, "induced_max_hops", 5),
-        induced_skip_node_threshold=getattr(ds_cfg, "induced_skip_node_threshold", None),
         edge_level_max_num_nodes=getattr(ds_cfg, "edge_level_max_num_nodes", None),
         induced_root=getattr(ds_cfg, "induced_root", ""),
         subgraph_svd=getattr(ds_cfg, "subgraph_svd", True),

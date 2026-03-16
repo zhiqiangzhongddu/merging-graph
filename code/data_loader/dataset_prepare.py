@@ -430,6 +430,11 @@ def _filter_unsupported_split_defs(
     return kept
 
 
+def _should_generate_splits_for_dataset(dataset_obj) -> bool:
+    """Return False for fully unlabeled datasets that are only prepared for pretraining artifacts."""
+    return getattr(dataset_obj, "has_labels", None) is not False
+
+
 def _generate_task_splits(
     dataset_obj,
     dataset_name: str,
@@ -918,7 +923,6 @@ def _process_non_edge_task(
     induced_min_size: int,
     induced_max_size: int,
     induced_max_hops: int,
-    induced_skip_node_threshold: int | None,
     feat_reduction: bool,
     feat_reduction_dim: int,
     subgraph_svd: bool,
@@ -939,66 +943,37 @@ def _process_non_edge_task(
     requested_task_uses_induced = induced and task_level == "node"
     effective_task_uses_induced = requested_task_uses_induced
     base_dataset_obj = None
-    skip_threshold = int(induced_skip_node_threshold or 0)
-
-    if requested_task_uses_induced and skip_threshold > 0:
-        with contextlib.redirect_stdout(io.StringIO()):
-            base_dataset_obj = create_dataset(
-                name=dataset,
-                root=root,
-                task_level=task_level,
-                induced=False,
-                induced_min_size=induced_min_size,
-                induced_max_size=induced_max_size,
-                induced_max_hops=induced_max_hops,
-                induced_root=dataset_induced_root,
-                split_root=dataset_split_root,
-                split=None,
-                seed=primary_seed,
-                feat_reduction=feat_reduction,
-                feat_reduction_dim=feat_reduction_dim,
-                feature_svd_dir=dataset_feature_svd_dir,
-            )
-        base_num_nodes = _dataset_num_nodes(base_dataset_obj)
-        if base_num_nodes is not None and int(base_num_nodes) > skip_threshold:
-            effective_task_uses_induced = False
-            print(
-                "[Induced] Skipping eager node induced subgraph materialization for "
-                f"{dataset}: num_nodes={int(base_num_nodes)} exceeds threshold={skip_threshold}. "
-                "Set data_preparation.dataset.induced_skip_node_threshold <= 0 to force generation."
-            )
-
-    if base_dataset_obj is not None and not effective_task_uses_induced:
-        dataset_obj = base_dataset_obj
-    else:
-        dataset_obj = create_dataset(
-            name=dataset,
-            root=root,
-            task_level=task_level,
-            induced=effective_task_uses_induced,
-            induced_min_size=induced_min_size,
-            induced_max_size=induced_max_size,
-            induced_max_hops=induced_max_hops,
-            induced_root=dataset_induced_root,
-            split_root=dataset_split_root,
-            split=split_for_dataset,
-            seed=primary_seed,
-            feat_reduction=feat_reduction,
-            feat_reduction_dim=feat_reduction_dim,
-            feature_svd_dir=dataset_feature_svd_dir,
-        )
+    dataset_obj = create_dataset(
+        name=dataset,
+        root=root,
+        task_level=task_level,
+        induced=effective_task_uses_induced,
+        induced_min_size=induced_min_size,
+        induced_max_size=induced_max_size,
+        induced_max_hops=induced_max_hops,
+        induced_root=dataset_induced_root,
+        split_root=dataset_split_root,
+        split=split_for_dataset,
+        seed=primary_seed,
+        feat_reduction=feat_reduction,
+        feat_reduction_dim=feat_reduction_dim,
+        feature_svd_dir=dataset_feature_svd_dir,
+    )
     if task_level == "node":
         _log_node_dataset_overview(dataset=dataset, dataset_obj=dataset_obj)
     elif task_level == "graph":
         _log_graph_dataset_overview(dataset=dataset, dataset_obj=dataset_obj)
 
-    # Regression tasks do not support few-shot split definitions.
-    effective_split_defs = _filter_unsupported_split_defs(
-        dataset_obj=dataset_obj,
-        dataset_name=dataset,
-        task_level=task_level,
-        split_defs=effective_split_defs,
-    )
+    if _should_generate_splits_for_dataset(dataset_obj):
+        # Regression tasks do not support few-shot split definitions.
+        effective_split_defs = _filter_unsupported_split_defs(
+            dataset_obj=dataset_obj,
+            dataset_name=dataset,
+            task_level=task_level,
+            split_defs=effective_split_defs,
+        )
+    else:
+        effective_split_defs = []
 
     if effective_split_defs:
         split_dataset_obj = dataset_obj
@@ -1068,7 +1043,6 @@ def try_load(
     induced_min_size: int = 10,
     induced_max_size: int = 30,
     induced_max_hops: int = 5,
-    induced_skip_node_threshold: int | None = None,
     edge_level_max_num_nodes: int | None = None,
     induced_root: str = "",
     subgraph_svd: bool = False,
@@ -1163,7 +1137,6 @@ def try_load(
                         induced_min_size=induced_min_size,
                         induced_max_size=induced_max_size,
                         induced_max_hops=induced_max_hops,
-                        induced_skip_node_threshold=induced_skip_node_threshold,
                         feat_reduction=feat_reduction,
                         feat_reduction_dim=feat_reduction_dim,
                         subgraph_svd=subgraph_svd,
@@ -1196,7 +1169,6 @@ def prepare_datasets(
     induced_min_size: int = 10,
     induced_max_size: int = 30,
     induced_max_hops: int = 5,
-    induced_skip_node_threshold: int | None = None,
     edge_level_max_num_nodes: int | None = None,
     induced_root: str = "",
     subgraph_svd: bool = False,
@@ -1245,7 +1217,6 @@ def prepare_datasets(
             induced_min_size=induced_min_size,
             induced_max_size=induced_max_size,
             induced_max_hops=induced_max_hops,
-            induced_skip_node_threshold=induced_skip_node_threshold,
             edge_level_max_num_nodes=edge_level_max_num_nodes,
             induced_root=induced_root,
             subgraph_svd=subgraph_svd,

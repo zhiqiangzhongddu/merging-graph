@@ -1,13 +1,9 @@
 import contextlib
-import csv
-import hashlib
 from numbers import Integral
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 import re
-from urllib.request import urlretrieve
 import warnings
-from zipfile import ZipFile
 
 import torch
 from torch.utils.data import Dataset, Subset
@@ -24,7 +20,7 @@ from torch_geometric.datasets import (
     EmailEUCore,
     GNNBenchmarkDataset,
     # FacebookPagePage,
-    # Flickr, # data processing needs more than 24h
+    Flickr, 
     # GemsecDeezer,
     # GitHub,
     HeterophilousGraphDataset,
@@ -35,8 +31,8 @@ from torch_geometric.datasets import (
     Planetoid,
     QM7b,
     QM9,
-    # Reddit,
-    # Reddit2,
+    Reddit,
+    Reddit2,
     TUDataset,
     # Twitch,
     WebKB,
@@ -47,7 +43,6 @@ from torch_geometric.datasets import (
 from torch_geometric.loader import DataLoader, LinkNeighborLoader
 from torch_geometric.transforms import Compose
 from torch_geometric.utils import degree, k_hop_subgraph, negative_sampling, subgraph
-from torch_geometric.utils.smiles import from_smiles
 
 # OGB pulls in `outdated`, which still imports `pkg_resources.parse_version`.
 # Keep that one third-party deprecation warning out of experiment logs.
@@ -61,6 +56,8 @@ from ogb.nodeproppred import PygNodePropPredDataset
 from ogb.graphproppred import PygGraphPropPredDataset
 
 from code.utils import ensure_dir, format_split_for_name
+from .utils import safe_torch_load
+from .zinc15_dataset import ZINC15Dataset
 from .dataset_domains import (
     CLASS_TO_DOMAIN,
     KEYWORD_DOMAINS,
@@ -75,6 +72,7 @@ warnings.filterwarnings(
     category=UserWarning,
     module="torch_geometric.data.in_memory_dataset",
 )
+# Sparse CSR tensor support is still in beta, and some datasets trigger related warnings when loading.
 warnings.filterwarnings(
     "ignore",
     message="Sparse CSR tensor support is in beta state.*",
@@ -98,7 +96,7 @@ Amazon_NAMES = {
     "photo": "Photo",
 }
 CitationFull_NAMES = {
-    "cora_ml": "cora_ml",
+    "cora-ml": "cora_ml",
     "dblp": "dblp",
 }
 Coauthor_NAMES = {
@@ -109,7 +107,7 @@ CoraFull_NAMES = {
     "corafull": "corafull",
 }
 EllipticBitcoinDataset_NAMES = {
-    "elliptic_bitcoin": "elliptic_bitcoin",
+    "elliptic-bitcoin": "elliptic_bitcoin",
 }
 EmailEUCore_NAMES = {
     "email": "email_eu_core",
@@ -125,15 +123,15 @@ HeterophilousGraphDataset_NAMES = {
     "minesweeper": "minesweeper",
     "questions": "questions",
     "roman-empire": "roman_empire",
-    # "tolokers": "tolokers", # data processing needs more than 24h
+    "tolokers": "tolokers",
 }
 # LastFMAsia_NAMES = {}
 LINKXDataset_NAMES = {
     "amherst41": "amherst41",
-    # "cornell5": "cornell5", # data processing needs more than 24h
+    "cornell5": "cornell5",
     "genius": "genius",
     "johnshopkins55": "johnshopkins55",
-    # "penn94": "penn94", # data processing needs more than 24h
+    "penn94": "penn94",
     "reed98": "reed98",
 }
 # LRGB_NODE_NAMES = {
@@ -154,7 +152,7 @@ OGBG_NAMES = {
 OGBN_NAMES = {
     "ogbn-arxiv": "ogbn-arxiv",
     "ogbn-mag": "ogbn-mag",
-    # "ogbn-papers100m": "ogbn-papers100M", # data processing needs more than 24h
+    "ogbn-papers100m": "ogbn-papers100M",
     "ogbn-products": "ogbn-products",
     "ogbn-proteins": "ogbn-proteins",
 }
@@ -163,12 +161,12 @@ Planetoid_NAMES = {
     "cora": "Cora",
     "pubmed": "PubMed",
 }
-# Reddit_NAMES = {
-#     "reddit": "reddit", # data processing needs more than 24h
-# }
-# Reddit2_NAMES = {
-#     "reddit2": "reddit2", # data processing needs more than 24h
-# }
+Reddit_NAMES = {
+    "reddit": "reddit",
+}
+Reddit2_NAMES = {
+    "reddit2": "reddit2",
+}
 # Twitch_NAMES = {"twitch-de": "DE", ...}
 WebKB_NAMES = {
     "cornell": "cornell", 
@@ -230,7 +228,7 @@ ZINC_NAMES = {
     "zinc": "zinc",
 }
 ZINC15_NAMES = {
-    "zinc15": "zinc15"
+    "zinc15": "zinc15",
 }
 
 
@@ -250,8 +248,8 @@ def _is_node_dataset_key(key: str) -> bool:
         or key in LINKXDataset_NAMES
         # or key in LRGB_NODE_NAMES
         or key in Planetoid_NAMES
-        # or key in Reddit_NAMES
-        # or key in Reddit2_NAMES
+        or key in Reddit_NAMES
+        or key in Reddit2_NAMES
         or key in WebKB_NAMES
         or key in WikiCS_NAMES
         or key in WikipediaNetwork_NAMES
@@ -300,14 +298,6 @@ def _force_ogb_prompts_yes():
         builtins.input = orig_input
         if ogb_url and orig_decide:
             ogb_url.decide_download = orig_decide
-
-
-# Compatibility loader to handle Torch 2.6+ weights_only default.
-def _safe_torch_load(path):
-    try:
-        return torch.load(path, weights_only=False)
-    except TypeError:
-        return torch.load(path)
 
 
 def _get_dataset_data_storage(dataset):
@@ -696,7 +686,7 @@ def _load_existing_indices(path: Path, expected_total: int):
     if not path.is_file():
         return None
     try:
-        payload = _safe_torch_load(path)
+        payload = safe_torch_load(path)
         train_idx = payload.get("train_indices") or payload.get("train")
         val_idx = payload.get("val_indices") or payload.get("val")
         test_idx = payload.get("test_indices") or payload.get("test")
@@ -856,7 +846,7 @@ def _load_existing_edge_split_payload(path: Path, expected_total_edges: int):
     if not path.is_file():
         return None
     try:
-        payload = _safe_torch_load(path)
+        payload = safe_torch_load(path)
     except Exception:
         return None
 
@@ -1052,7 +1042,7 @@ def _load_induced_cache(path: Path, expected_meta: Dict) -> Dict | None:
     if not path.is_file():
         return None
     try:
-        payload = _safe_torch_load(path)
+        payload = safe_torch_load(path)
         meta = payload.get("meta", {})
         for k, v in expected_meta.items():
             if meta.get(k) != v:
@@ -1455,194 +1445,6 @@ class InducedGraphDataset(Dataset):
         return data
 
 
-class ZINC15Dataset(Dataset):
-    """Lazy SMILES-backed loader for the 2M-molecule ZINC15 pretraining subset."""
-
-    url = "http://snap.stanford.edu/gnn-pretrain/data/chem_dataset.zip"
-    expected_md5 = "9126f2aab5f2cd3fccd307616eec6779"
-    member_path = "dataset/zinc_standard_agent/processed/smiles.csv"
-
-    def __init__(self, root: str, transform=None, sample_stats_size: int = 2048, name: str = "zinc15"):
-        if from_smiles is None:
-            raise ImportError("torch_geometric.utils.smiles.from_smiles is required for ZINC15.")
-
-        self.name = str(name).lower()
-        self.root = _scoped_root(root, "zinc15")
-        self.transform = transform
-        self.sample_stats_size = max(1, int(sample_stats_size))
-
-        self.raw_dir = Path(self.root) / "raw"
-        self.processed_dir = Path(self.root) / "processed"
-        self.raw_zip_path = self.raw_dir / "chem_dataset.zip"
-        self.smiles_path = self.raw_dir / "smiles.csv"
-        self.index_path = self.processed_dir / "smiles_index.pt"
-        self._file_handle = None
-
-        self._ensure_ready()
-        metadata = self._load_or_build_index()
-        self.offsets = metadata["offsets"].to(torch.long)
-        self.num_graphs = int(metadata["num_graphs"])
-        self.avg_nodes_per_graph = float(metadata.get("avg_nodes_per_graph", 0.0))
-        self.avg_edges_per_graph = float(metadata.get("avg_edges_per_graph", 0.0))
-        self.total_nodes = (
-            int(round(self.avg_nodes_per_graph * self.num_graphs))
-            if self.avg_nodes_per_graph > 0
-            else None
-        )
-        self.total_edges = (
-            int(round(self.avg_edges_per_graph * self.num_graphs))
-            if self.avg_edges_per_graph > 0
-            else None
-        )
-        self.num_classes = None
-        self.has_labels = False
-
-    def _ensure_ready(self) -> None:
-        ensure_dir(str(self.raw_dir))
-        ensure_dir(str(self.processed_dir))
-
-        archive_ready = self._has_required_member(self.raw_zip_path)
-        if not archive_ready:
-            if self.raw_zip_path.is_file():
-                self.raw_zip_path.unlink()
-            print(f"[Dataset] Downloading {self.name} from {self.url}")
-            urlretrieve(self.url, str(self.raw_zip_path))
-            if not self._has_required_member(self.raw_zip_path):
-                raise ValueError("Downloaded ZINC15 archive is invalid or missing the expected SMILES file.")
-        elif not self._check_md5(self.raw_zip_path, self.expected_md5):
-            print(
-                "[Dataset] ZINC15 archive MD5 differs from the historical TorchDrug value; "
-                "continuing after zip/member validation."
-            )
-
-        if not self.smiles_path.is_file():
-            print(f"[Dataset] Extracting {self.member_path} -> {self.smiles_path}")
-            with ZipFile(self.raw_zip_path, "r") as zf:
-                with zf.open(self.member_path) as src, open(self.smiles_path, "wb") as dst:
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
-
-    @staticmethod
-    def _check_md5(path: Path, expected_md5: str) -> bool:
-        if not path.is_file():
-            return False
-        digest = hashlib.md5()
-        with open(path, "rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest() == expected_md5
-
-    def _has_required_member(self, path: Path) -> bool:
-        if not path.is_file():
-            return False
-        try:
-            with ZipFile(path, "r") as zf:
-                return self.member_path in zf.namelist()
-        except Exception:
-            return False
-
-    def _load_or_build_index(self) -> Dict[str, torch.Tensor | float | int]:
-        if self.index_path.is_file():
-            try:
-                payload = _safe_torch_load(self.index_path)
-                offsets = payload.get("offsets")
-                if torch.is_tensor(offsets) and offsets.numel() > 0:
-                    return payload
-            except Exception:
-                pass
-
-        offsets: List[int] = []
-        with open(self.smiles_path, "rb") as handle:
-            first_offset = handle.tell()
-            first_line = handle.readline()
-            if not first_line:
-                raise ValueError(f"Empty ZINC15 SMILES file: {self.smiles_path}")
-            first_text = first_line.decode("utf-8", errors="ignore").strip().split(",", 1)[0].strip().lower()
-            if first_text != "smiles":
-                offsets.append(first_offset)
-            while True:
-                offset = handle.tell()
-                line = handle.readline()
-                if not line:
-                    break
-                if line.strip():
-                    offsets.append(offset)
-
-        avg_nodes, avg_edges = self._estimate_graph_stats(offsets)
-        payload = {
-            "offsets": torch.tensor(offsets, dtype=torch.long),
-            "num_graphs": int(len(offsets)),
-            "avg_nodes_per_graph": float(avg_nodes),
-            "avg_edges_per_graph": float(avg_edges),
-        }
-        torch.save(payload, self.index_path)
-        return payload
-
-    def _estimate_graph_stats(self, offsets: List[int]) -> Tuple[float, float]:
-        if not offsets:
-            return 0.0, 0.0
-        sample_count = min(len(offsets), self.sample_stats_size)
-        node_total = 0
-        edge_total = 0
-        with open(self.smiles_path, "rb") as handle:
-            for offset in offsets[:sample_count]:
-                handle.seek(int(offset))
-                line = handle.readline().decode("utf-8", errors="ignore")
-                smiles = self._parse_smiles_line(line)
-                data = from_smiles(smiles)
-                node_total += int(data.num_nodes)
-                edge_total += int(data.num_edges)
-        return float(node_total) / float(sample_count), float(edge_total) / float(sample_count)
-
-    @staticmethod
-    def _parse_smiles_line(line: str) -> str:
-        row = next(csv.reader([line.strip()]))
-        if not row:
-            raise ValueError("Encountered empty SMILES row in ZINC15.")
-        return row[0].strip()
-
-    def _get_file_handle(self):
-        if self._file_handle is None or self._file_handle.closed:
-            self._file_handle = open(self.smiles_path, "rb")
-        return self._file_handle
-
-    def __len__(self):
-        return self.num_graphs
-
-    def __getitem__(self, idx):
-        total = len(self)
-        if idx < 0:
-            idx += total
-        if idx < 0 or idx >= total:
-            raise IndexError(f"ZINC15Dataset index out of range: {idx}")
-
-        handle = self._get_file_handle()
-        handle.seek(int(self.offsets[idx].item()))
-        line = handle.readline().decode("utf-8", errors="ignore")
-        smiles = self._parse_smiles_line(line)
-        data = from_smiles(smiles)
-        data.smiles = smiles
-        if self.transform is not None:
-            data = self.transform(data)
-        return data
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["_file_handle"] = None
-        return state
-
-    def __del__(self):
-        handle = getattr(self, "_file_handle", None)
-        if handle is not None and not handle.closed:
-            handle.close()
-
-
 def _load_node_dataset(
     name: str, 
     root: str, 
@@ -1653,7 +1455,7 @@ def _load_node_dataset(
     key = name.lower()
     if key in Actor_NAMES:
         return Actor(
-            root=_scoped_root(root, "actor"), 
+            root=_scoped_root(root, key), 
             transform=transform
         )
     elif key in Airports_NAMES:
@@ -1689,7 +1491,6 @@ def _load_node_dataset(
             transform=transform
         )
     elif key in CoraFull_NAMES:
-        dataset_key = CoraFull_NAMES[key]
         root_key = _scoped_root(root, key)
         return CoraFull(
             root=root_key, 
@@ -1697,7 +1498,7 @@ def _load_node_dataset(
         )
     elif key in EllipticBitcoinDataset_NAMES:
         dataset_key = EllipticBitcoinDataset_NAMES[key]
-        root_key = _scoped_root(root, key)
+        root_key = _scoped_root(root, key) if key != dataset_key else root
         return EllipticBitcoinDataset(
             root=root_key, 
             transform=transform
@@ -1711,13 +1512,13 @@ def _load_node_dataset(
         )
     # elif key in FacebookPagePage_NAMES:
     #     return FacebookPagePage(_scoped_root(root, "facebook_page-page"), transform=transform)
-    # elif key in Flickr_NAMES:
-    #     dataset_key = Flickr_NAMES[key]
-    #     root_key = _scoped_root(root, key)
-    #     return Flickr(
-    #         root=root_key, 
-    #         transform=transform
-    #     )
+    elif key in Flickr_NAMES:
+        dataset_key = Flickr_NAMES[key]
+        root_key = _scoped_root(root, key)
+        return Flickr(
+            root=root_key, 
+            transform=transform
+        )
     # elif key in GemsecDeezer_NAMES:
     #     dataset_key = GemsecDeezer_NAMES[key]
     #     return GemsecDeezer(_scoped_root(root, "GemsecDeezer"), dataset_key, transform=transform)
@@ -1752,18 +1553,18 @@ def _load_node_dataset(
             name=dataset_key,
             transform=transform
         )
-    # elif key in Reddit_NAMES:
-    #     root_key = _scoped_root(root, key)
-    #     return Reddit(
-    #         root=root_key, 
-    #         transform=transform
-    #     )
-    # elif key in Reddit2_NAMES:
-    #     root_key = _scoped_root(root, key)
-    #     return Reddit2(
-    #         root=root_key, 
-    #         transform=transform
-    #     )
+    elif key in Reddit_NAMES:
+        root_key = _scoped_root(root, key)
+        return Reddit(
+            root=root_key, 
+            transform=transform
+        )
+    elif key in Reddit2_NAMES:
+        root_key = _scoped_root(root, key)
+        return Reddit2(
+            root=root_key, 
+            transform=transform
+        )
     # elif key in Twitch_NAMES:
     #     dataset_key = Twitch_NAMES[key]
     #     return Twitch(_scoped_root(root, "Twitch"), dataset_key, transform=transform)
@@ -1784,7 +1585,6 @@ def _load_node_dataset(
             transform=transform
         )
     elif key in WikiCS_NAMES:
-        dataset_key = WikiCS_NAMES[key]
         root_key = _scoped_root(root, key)
         return WikiCS(
             root=root_key, 
@@ -1832,27 +1632,24 @@ def _load_graph_dataset(
     #     return LRGBDataset(_scoped_root(root, key), dataset_key, transform=transform)
     elif key in QM7b_NAMES:
         dataset_key = QM7b_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return QM7b(
             root=root_key, 
             transform=transform
         )
     elif key in QM9_NAMES:
-        dataset_key = QM9_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return QM9(
             root=root_key, 
             transform=transform
         )
     elif key in ZINC15_NAMES:
-        dataset_key = ZINC15_NAMES[key]
-        root_key = root
+        root_key = _scoped_root(root, key)
         return ZINC15Dataset(
             root=root_key, 
             transform=transform
         )
     elif key in ZINC_NAMES:
-        dataset_key = ZINC_NAMES[key]
         root_key = _scoped_root(root, key)
         return ZINC(
             root=root_key, 
