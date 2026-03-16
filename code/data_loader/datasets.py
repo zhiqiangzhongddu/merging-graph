@@ -24,7 +24,7 @@ from torch_geometric.datasets import (
     EmailEUCore,
     GNNBenchmarkDataset,
     # FacebookPagePage,
-    Flickr,
+    # Flickr, # data processing needs more than 24h
     # GemsecDeezer,
     # GitHub,
     HeterophilousGraphDataset,
@@ -130,10 +130,10 @@ HeterophilousGraphDataset_NAMES = {
 # LastFMAsia_NAMES = {}
 LINKXDataset_NAMES = {
     "amherst41": "amherst41",
-    "cornell5": "cornell5",
+    # "cornell5": "cornell5", # data processing needs more than 24h
     "genius": "genius",
     "johnshopkins55": "johnshopkins55",
-    "penn94": "penn94",
+    # "penn94": "penn94", # data processing needs more than 24h
     "reed98": "reed98",
 }
 # LRGB_NODE_NAMES = {
@@ -154,7 +154,7 @@ OGBG_NAMES = {
 OGBN_NAMES = {
     "ogbn-arxiv": "ogbn-arxiv",
     "ogbn-mag": "ogbn-mag",
-    "ogbn-papers100m": "ogbn-papers100M",
+    # "ogbn-papers100m": "ogbn-papers100M", # data processing needs more than 24h
     "ogbn-products": "ogbn-products",
     "ogbn-proteins": "ogbn-proteins",
 }
@@ -163,12 +163,12 @@ Planetoid_NAMES = {
     "cora": "Cora",
     "pubmed": "PubMed",
 }
-Reddit_NAMES = {
-    "reddit": "reddit",
-}
-Reddit2_NAMES = {
-    "reddit2": "reddit2",
-}
+# Reddit_NAMES = {
+#     "reddit": "reddit", # data processing needs more than 24h
+# }
+# Reddit2_NAMES = {
+#     "reddit2": "reddit2", # data processing needs more than 24h
+# }
 # Twitch_NAMES = {"twitch-de": "DE", ...}
 WebKB_NAMES = {
     "cornell": "cornell", 
@@ -250,8 +250,8 @@ def _is_node_dataset_key(key: str) -> bool:
         or key in LINKXDataset_NAMES
         # or key in LRGB_NODE_NAMES
         or key in Planetoid_NAMES
-        or key in Reddit_NAMES
-        or key in Reddit2_NAMES
+        # or key in Reddit_NAMES
+        # or key in Reddit2_NAMES
         or key in WebKB_NAMES
         or key in WikiCS_NAMES
         or key in WikipediaNetwork_NAMES
@@ -1711,13 +1711,13 @@ def _load_node_dataset(
         )
     # elif key in FacebookPagePage_NAMES:
     #     return FacebookPagePage(_scoped_root(root, "facebook_page-page"), transform=transform)
-    elif key in Flickr_NAMES:
-        dataset_key = Flickr_NAMES[key]
-        root_key = _scoped_root(root, key)
-        return Flickr(
-            root=root_key, 
-            transform=transform
-        )
+    # elif key in Flickr_NAMES:
+    #     dataset_key = Flickr_NAMES[key]
+    #     root_key = _scoped_root(root, key)
+    #     return Flickr(
+    #         root=root_key, 
+    #         transform=transform
+    #     )
     # elif key in GemsecDeezer_NAMES:
     #     dataset_key = GemsecDeezer_NAMES[key]
     #     return GemsecDeezer(_scoped_root(root, "GemsecDeezer"), dataset_key, transform=transform)
@@ -1853,7 +1853,7 @@ def _load_graph_dataset(
         )
     elif key in ZINC_NAMES:
         dataset_key = ZINC_NAMES[key]
-        root_key = _scoped_root(root, key) if key != dataset_key else root
+        root_key = _scoped_root(root, key)
         return ZINC(
             root=root_key, 
             subset=False, 
