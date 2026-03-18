@@ -41,7 +41,7 @@ if srun ${SRUN_EXTRA_ARGS} --ntasks=4 --kill-on-bad-exit=1 bash <<'SRUN_SCRIPT'
 set -euo pipefail
 
 METHODS=(edge_pred edge_pred context_pred context_pred)
-BATCH_SIZES=(512 2048 512 2048)
+BATCH_SIZES=(256 512 256 512)
 
 TASK_ID="${SLURM_PROCID:-0}"
 TOTAL_TASKS="${SLURM_NTASKS:-4}"
@@ -64,7 +64,6 @@ python "${ROOT_DIR}/run_pretrain.py" \
   model.name gin \
   pretrain.dataset.name zinc15 \
   pretrain.dataset.task_level graph \
-  pretrain.dataset.feat_reduction True \
   pretrain.dataset.induced False \
   pretrain.method "${METHOD}" \
   pretrain.epochs 100 \

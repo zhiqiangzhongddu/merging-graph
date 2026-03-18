@@ -183,19 +183,47 @@ def _dataset_len(loader) -> Optional[int]:
         return None
 
 
+def _resolve_subset_base_and_indices(dataset):
+    """Unwrap nested Subset wrappers and map indices back to the base dataset."""
+    if dataset is None:
+        return None, None
+
+    base_dataset = dataset
+    resolved_indices = None
+
+    while hasattr(base_dataset, "dataset") and hasattr(base_dataset, "indices"):
+        try:
+            current_indices = list(base_dataset.indices)
+        except Exception:
+            current_indices = None
+        parent = getattr(base_dataset, "dataset", None)
+        if parent is None or parent is base_dataset:
+            break
+
+        if current_indices is None:
+            resolved_indices = None
+        elif resolved_indices is None:
+            resolved_indices = current_indices
+        else:
+            try:
+                resolved_indices = [current_indices[idx] for idx in resolved_indices]
+            except Exception:
+                resolved_indices = None
+
+        base_dataset = parent
+
+    return base_dataset, resolved_indices
+
+
 def _subset_total_from_slices(dataset, key: str) -> Optional[int]:
     """Best-effort fast aggregate from InMemoryDataset slices without loading every graph."""
     if dataset is None:
         return None
 
-    base_dataset = dataset
-    indices = None
-    if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-        base_dataset = dataset.dataset
-        try:
-            indices = list(dataset.indices)
-        except Exception:
-            indices = None
+    base_dataset, indices = _resolve_subset_base_and_indices(dataset)
+    if base_dataset is None:
+        return None
+
     if indices is None:
         try:
             indices = list(range(len(dataset)))
@@ -235,14 +263,9 @@ def _subset_total_from_values(dataset, key: str) -> Optional[int]:
     if dataset is None:
         return None
 
-    base_dataset = dataset
-    indices = None
-    if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-        base_dataset = dataset.dataset
-        try:
-            indices = list(dataset.indices)
-        except Exception:
-            indices = None
+    base_dataset, indices = _resolve_subset_base_and_indices(dataset)
+    if base_dataset is None:
+        return None
 
     storage = _dataset_data_storage(base_dataset)
     if storage is None:
@@ -451,13 +474,18 @@ def _generate_task_splits(
     dataset_split_root = Path(split_root)
     failures = 0
     total_jobs = len(split_defs) * len(split_seeds)
+    status_counts: Dict[str, int] = {
+        "loaded": 0,
+        "saved": 0,
+        "builtin": 0,
+    }
     for split_def in split_defs:
         for seed in split_seeds:
             split_name = _split_dataset_name(dataset_name, task_level, int(seed))
             try:
                 # Suppress per-file split logs; report one concise summary per task.
                 with contextlib.redirect_stdout(io.StringIO()):
-                    train_loader, val_loader, test_loader = make_loaders(
+                    train_loader, val_loader, test_loader, split_meta = make_loaders(
                         dataset=dataset_obj,
                         dataset_name=split_name,
                         task_level=task_level,
@@ -467,7 +495,12 @@ def _generate_task_splits(
                         seed=int(seed),
                         induced=False,
                         split_root=str(dataset_split_root),
+                        return_split_meta=True,
                     )
+                status = str(split_meta.get("status") or "builtin") if isinstance(split_meta, dict) else "builtin"
+                if status not in status_counts:
+                    status = "builtin"
+                status_counts[status] += 1
                 split_stats = _split_stats_line(
                     task_level=task_level,
                     train_loader=train_loader,
@@ -477,7 +510,7 @@ def _generate_task_splits(
                 if split_stats:
                     print(
                         f"[DataPrep][Split][Stats] dataset={dataset_name} task level={task_level} "
-                        f"split={split_def} seed={seed} {split_stats}"
+                        f"split={split_def} seed={seed} status={status} {split_stats}"
                     )
             except Exception as exc:  # pylint: disable=broad-except
                 failures += 1
@@ -486,11 +519,12 @@ def _generate_task_splits(
                     f"split={split_def} seed={seed} root={dataset_split_root}: {exc}"
                 )
 
-    generated = total_jobs - failures
+    completed = total_jobs - failures
     print(
         f"[DataPrep][Split] dataset={dataset_name} task level={task_level} "
-        f"splits={len(split_defs)} seeds={len(split_seeds)} generated={generated} "
-        f"failed={failures} root={dataset_split_root}"
+        f"splits={len(split_defs)} seeds={len(split_seeds)} completed={completed} "
+        f"loaded={status_counts['loaded']} saved={status_counts['saved']} "
+        f"builtin={status_counts['builtin']} failed={failures} root={dataset_split_root}"
     )
     return failures
 
@@ -773,6 +807,14 @@ def _log_node_dataset_overview(dataset: str, dataset_obj) -> None:
 
 def _log_graph_dataset_overview(dataset: str, dataset_obj) -> None:
     """Print graph dataset overview."""
+    graph_filter_meta = getattr(dataset_obj, "graph_filter_meta", None)
+    if isinstance(graph_filter_meta, dict):
+        print(
+            f"[DataPrep][GraphFilter] dataset={dataset} "
+            f"raw_total={int(graph_filter_meta.get('raw_total', len(dataset_obj)))} "
+            f"filtered_total={int(graph_filter_meta.get('filtered_total', len(dataset_obj)))} "
+            f"drop_count={int(graph_filter_meta.get('drop_count', 0))}"
+        )
     dataset_info(
         dataset=dataset_obj,
         task_level="graph",
