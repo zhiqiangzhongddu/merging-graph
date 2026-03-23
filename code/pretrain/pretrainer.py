@@ -84,7 +84,8 @@ class PretrainRunner:
             # Unsupervised pretraining methods operate on full data and do not need
             # persisted train/val/test split files.
             if not (str(raw_task_level).lower() == "edge" and induced):
-                split_root_for_dataset = ""
+                if str(raw_task_level).lower() != "graph":
+                    split_root_for_dataset = ""
                 split_for_dataset = None
         if cfg.pretrain.method == "graphcl" and str(raw_task_level).lower() == "node" and not induced:
             raise ValueError(
