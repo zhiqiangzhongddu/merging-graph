@@ -1,2 +1,0 @@
-"""Bonsai context-generation package."""
-
