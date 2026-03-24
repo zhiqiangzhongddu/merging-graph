@@ -13,7 +13,12 @@ from code.model import build_encoder_from_cfg
 from code.pretrain.base import PretrainTask
 from code.pretrain.checkpoint import cfg_to_dict, save_checkpoint
 from code.pretrain.methods.utils import get_batch_vector, pool_nodes
-from code.utils import compute_supervised_metrics, ensure_dir, format_split_for_name, set_seed
+from code.train.monitoring import resolve_train_monitor_spec
+from code.utils.metrics import compute_supervised_metrics
+from code.utils.monitoring import resolve_monitor_value
+from code.utils.naming import format_split_for_name
+from code.utils.paths import ensure_dir
+from code.utils.random import set_seed
 
 
 def _shared_split_root(cfg) -> str:
@@ -42,7 +47,14 @@ class TrainSupervised(PretrainTask):
         ds_cfg = getattr(getattr(cfg, "train", None), "dataset", None) or getattr(cfg, "dataset", None)
         self.task_level = ds_cfg.task_level
         self.task_type = str(getattr(ds_cfg, "task_type", "classification") or "classification").lower()
-        out_dim = 1 if self.task_type == "regression" else int(getattr(ds_cfg, "num_classes", 1) or 1)
+        self.label_dim = int(getattr(ds_cfg, "label_dim", 1) or 1)
+        num_classes = int(getattr(ds_cfg, "num_classes", 1) or 1)
+        if self.task_type == "regression":
+            out_dim = 1
+        elif self.label_dim > 1:
+            out_dim = self.label_dim
+        else:
+            out_dim = num_classes
         self.classifier = nn.Linear(
             in_features=cfg.model.out_dim,
             out_features=out_dim,
@@ -50,13 +62,6 @@ class TrainSupervised(PretrainTask):
 
     @staticmethod
     def _prepare_labels(labels: torch.Tensor) -> torch.Tensor:
-        if labels.dim() > 1:
-            if labels.size(-1) == 1:
-                labels = labels.view(-1)
-            else:
-                labels = labels[:, 0].view(-1)
-        else:
-            labels = labels.view(-1)
         return labels
 
     def _forward(self, model, data, device, mask_attr: str = "train_mask", return_outputs: bool = False):
@@ -83,14 +88,45 @@ class TrainSupervised(PretrainTask):
 
         if self.task_type == "regression":
             pred = logits_used.view(-1).float()
-            target = labels.view(-1).float()
+            target = torch.as_tensor(labels).view(-1).float()
             loss = F.mse_loss(pred, target)
             mae = float((pred - target).abs().mean().item())
             if return_outputs:
                 return loss, mae, pred, target
             return loss, mae
 
-        class_labels = labels
+        labels_tensor = torch.as_tensor(labels)
+        if labels_tensor.dim() > 1 and labels_tensor.size(-1) > 1:
+            targets = labels_tensor.float()
+            valid = torch.isfinite(targets)
+            uses_signed = bool((targets < 0).any().item())
+            if uses_signed:
+                valid = valid & (targets != 0)
+                targets = (targets + 1.0) / 2.0
+            targets = targets.clamp(min=0.0, max=1.0)
+            safe_targets = torch.where(valid, targets, torch.zeros_like(targets))
+
+            loss_mat = F.binary_cross_entropy_with_logits(
+                logits_used.float(),
+                safe_targets,
+                reduction="none",
+            )
+            valid_f = valid.float()
+            denom = valid_f.sum().clamp(min=1.0)
+            loss = (loss_mat * valid_f).sum() / denom
+
+            probs = torch.sigmoid(logits_used.float())
+            pred = (probs >= 0.5).float()
+            acc = float(((pred == targets).float() * valid_f).sum().item() / float(denom.item()))
+            if return_outputs:
+                return loss, acc, logits_used, labels_tensor
+            return loss, acc
+
+        class_labels = labels_tensor
+        if class_labels.dim() > 1:
+            class_labels = class_labels.view(class_labels.size(0), -1)[:, 0]
+        else:
+            class_labels = class_labels.view(-1)
         if class_labels.dtype.is_floating_point:
             rounded = class_labels.round()
             if torch.allclose(class_labels, rounded, atol=1e-6):
@@ -175,6 +211,8 @@ class TrainRunner:
         cfg.model.in_dim = cfg.model.in_dim or self.dataset_meta["num_node_features"]
         if getattr(ds_cfg, "num_classes", None) is None:
             ds_cfg.num_classes = self.dataset_meta.get("num_classes")
+        if getattr(ds_cfg, "label_dim", None) is None:
+            ds_cfg.label_dim = self.dataset_meta.get("label_dim")
 
         self.model = build_encoder_from_cfg(
             cfg=cfg,
@@ -205,31 +243,17 @@ class TrainRunner:
         )
 
     def _init_monitoring(self) -> None:
-        task_type = str(getattr(self.cfg.train.dataset, "task_type", "classification") or "classification").lower()
-        task_level = str(getattr(self, "task_level_raw", self.cfg.train.dataset.task_level) or "").lower()
+        label_dim = int(getattr(self.cfg.train.dataset, "label_dim", 1) or 1)
         split = getattr(self, "split", None)
-
-        # Monitoring policy:
-        # - Few-shot: training loss (validation split is intentionally empty)
-        # - Classification: accuracy
-        # - Edge prediction: AUC (link-task selection)
-        # - Regression: training loss (loss-based selection)
-        if self._is_few_shot_split(split):
-            self.monitor_name = "train_loss"
-            self.monitor_mode = "min"
-            self.best_metric = float("inf")
-        elif task_level == "edge":
-            self.monitor_name = "val_auc"
-            self.monitor_mode = "max"
-            self.best_metric = float("-inf")
-        elif task_type == "regression":
-            self.monitor_name = "train_loss"
-            self.monitor_mode = "min"
-            self.best_metric = float("inf")
-        else:
-            self.monitor_name = "val_acc"
-            self.monitor_mode = "max"
-            self.best_metric = float("-inf")
+        spec = resolve_train_monitor_spec(
+            self.cfg,
+            task_level=str(getattr(self, "task_level_raw", self.cfg.train.dataset.task_level) or "").lower(),
+            label_dim=label_dim,
+            few_shot_without_validation=self._is_few_shot_split(split),
+        )
+        self.monitor_name = spec.name
+        self.monitor_mode = spec.mode
+        self.best_metric = spec.best_metric
         self.best_epoch = None
         self.best_metrics: Dict[str, float] = {}
 
@@ -367,19 +391,23 @@ class TrainRunner:
         test_metrics: Dict[str, float],
         monitor_value: float,
     ) -> None:
-        if not self._is_improved(monitor_value):
-            return
-
-        self.best_metric = monitor_value
-        self.best_epoch = epoch
+        if self.monitor_name is None:
+            self.best_metric = float(monitor_value)
+            self.best_epoch = epoch
+        else:
+            if not self._is_improved(monitor_value):
+                return
+            self.best_metric = float(monitor_value)
+            self.best_epoch = epoch
         metrics = {
             "train_loss": train_loss,
             "best_epoch": epoch,
-            self.monitor_name: monitor_value,
             **train_logs,
             **val_metrics,
             **test_metrics,
         }
+        if self.monitor_name is not None:
+            metrics[self.monitor_name] = float(monitor_value)
         save_checkpoint(
             path=self._checkpoint_path(),
             model=self.model,
@@ -391,7 +419,10 @@ class TrainRunner:
         )
         self.best_metrics = metrics
         self._save_training_log()
-        print(f"[Train] Best epoch updated: epoch={epoch} {self.monitor_name}={monitor_value:.4f}")
+        if self.monitor_name is None:
+            print(f"[Train] Checkpoint updated at epoch={epoch} (monitor disabled).")
+        else:
+            print(f"[Train] Best epoch updated: epoch={epoch} {self.monitor_name}={monitor_value:.4f}")
 
     def train_epoch(self, epoch: int) -> Tuple[float, Dict[str, float]]:
         self.model.train()
@@ -448,8 +479,19 @@ class TrainRunner:
             f"{prefix}_loss": total_loss / num_batches,
         }
         if logits_buffer and labels_buffer:
-            logits = torch.cat([x.view(-1) if x.dim() == 1 else x for x in logits_buffer], dim=0)
-            labels = torch.cat([y.view(-1) for y in labels_buffer], dim=0)
+            logits = torch.cat(
+                [x.view(-1, 1) if x.dim() == 1 else x.view(x.size(0), -1) for x in logits_buffer],
+                dim=0,
+            )
+            if any(y.dim() > 1 for y in labels_buffer):
+                labels = torch.cat(
+                    [y.view(-1, 1) if y.dim() == 1 else y.view(y.size(0), -1) for y in labels_buffer],
+                    dim=0,
+                )
+                if labels.dim() == 2 and labels.size(1) == 1:
+                    labels = labels.view(-1)
+            else:
+                labels = torch.cat([y.view(-1) for y in labels_buffer], dim=0)
             task_type = str(getattr(self.cfg.train.dataset, "task_type", "classification") or "classification").lower()
             for key, value in compute_supervised_metrics(logits=logits, labels=labels, task_type=task_type).items():
                 metrics[f"{prefix}_{key}"] = float(value)
@@ -501,18 +543,21 @@ class TrainRunner:
                 }
             )
 
-            monitor_value = val_metrics.get(self.monitor_name)
-            if monitor_value is None:
-                monitor_value = train_loss
-
-            improved = self._is_improved(float(monitor_value))
+            monitor_value = resolve_monitor_value(
+                self.monitor_name,
+                train_loss=train_loss,
+                train_logs=train_logs,
+                val_metrics=val_metrics,
+                test_metrics=test_metrics,
+            )
+            improved = True if self.monitor_name is None else self._is_improved(monitor_value)
             self._save_best_checkpoint(
                 epoch=epoch,
                 train_loss=train_loss,
                 train_logs=train_logs,
                 val_metrics=val_metrics,
                 test_metrics=test_metrics,
-                monitor_value=float(monitor_value),
+                monitor_value=monitor_value,
             )
 
             if patience > 0:
@@ -527,10 +572,14 @@ class TrainRunner:
                     )
                     break
 
-        print(
-            f"[Train] Complete. Best {self.monitor_name}: "
-            f"{self.best_metric:.4f} at epoch {self.best_epoch}."
-        )
+        if self.monitor_name is not None:
+            print(
+                f"[Train] Complete. Best {self.monitor_name}: "
+                f"{self.best_metric:.4f} at epoch {self.best_epoch}."
+            )
+        else:
+            final_epoch = self.train_history[-1]["epoch"] if self.train_history else 0
+            print(f"[Train] Complete. Final epoch: {final_epoch} (early stopping disabled).")
         for metric_name in ("test_acc", "test_micro_f1", "test_macro_f1", "test_auc", "test_mae", "test_mse"):
             metric_value = self.best_metrics.get(metric_name)
             if metric_value is not None:

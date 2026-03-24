@@ -1,3 +1,11 @@
+"""Metadata helpers for PyG datasets used throughout the data-loading stack.
+
+This module infers task properties such as regression vs. classification,
+resolves split-strategy hints from label structure, derives lightweight
+summaries for node, edge, and graph tasks, and reports split instance counts
+for logging.
+"""
+
 from typing import Dict, Optional, Tuple
 import warnings
 

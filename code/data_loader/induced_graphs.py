@@ -1,3 +1,5 @@
+"""Utilities for generating and caching node- and edge-induced subgraph datasets."""
+
 from pathlib import Path
 from typing import Dict, List, Tuple
 

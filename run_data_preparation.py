@@ -1,4 +1,4 @@
-"""CLI entrypoint for dataset preparation."""
+"""Thin CLI entrypoint that forwards dataset-preparation args to the shared runner."""
 
 from __future__ import annotations
 

@@ -92,10 +92,11 @@ class FinetuneSupervised(PretrainTask):
                 valid = valid & (targets != 0)
                 targets = (targets + 1.0) / 2.0
             targets = targets.clamp(min=0.0, max=1.0)
+            safe_targets = torch.where(valid, targets, torch.zeros_like(targets))
 
             loss_mat = F.binary_cross_entropy_with_logits(
                 logits_used.float(),
-                targets,
+                safe_targets,
                 reduction="none",
             )
             valid_f = valid.float()

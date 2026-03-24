@@ -8,9 +8,14 @@ import torch
 from torch import optim
 
 from code.data_loader import create_dataset, dataset_info, log_split_instance_counts, make_loaders
+from code.finetune.monitoring import resolve_finetune_monitor_spec
 from code.model import build_encoder_from_cfg
 from code.pretrain.checkpoint import cfg_to_dict, save_checkpoint
-from code.utils import compute_supervised_metrics, ensure_dir, format_split_for_name, set_seed
+from code.utils.metrics import compute_supervised_metrics
+from code.utils.monitoring import monitor_uses_train_split, resolve_monitor_value
+from code.utils.naming import format_split_for_name
+from code.utils.paths import ensure_dir
+from code.utils.random import set_seed
 from .encoders.prompt_encoder import build_prompt_encoder_from_cfg
 from .supervised import FinetuneSupervised
 from .registry import build_finetune_task
@@ -308,89 +313,21 @@ class FinetuneRunner:
         }
 
     def _init_monitoring(self) -> None:
-        """
-        Initialize early stopping monitoring.
-
-        Policy:
-        - Explicit `finetune.monitor_metric`: respected when set to a known metric name
-        - Classification: monitor `val_acc`
-        - Few-shot split without validation weight: monitor `train_loss`
-        - Prompt-only methods (all_in_one/gppt): monitor `train_loss`
-        - Edge prediction: monitor `val_auc`
-        - Regression: monitor `train_loss` (loss-based early stopping)
-        - `none`/`disabled`: disable early stopping checks
-        """
-        monitor_metric = getattr(self.cfg.finetune, "monitor_metric", "auto")
-        monitor_metric = monitor_metric.lower() if monitor_metric else "auto"
-        task_type = str(getattr(self.cfg.finetune.dataset, "task_type", "classification") or "classification").lower()
-        task_level = str(getattr(self, "task_level_raw", self.cfg.finetune.dataset.task_level) or "").lower()
+        """Resolve checkpoint monitoring for finetuning and prompt-based methods."""
         label_dim = int(getattr(self.cfg.finetune.dataset, "label_dim", 1) or 1)
         few_shot_no_val = self._few_shot_without_validation()
         method_name = str(getattr(self, "finetune_method", getattr(self.cfg.finetune, "method", "")) or "").lower()
         method_name = method_name.replace("-", "_")
-        gpf_cfg = getattr(getattr(self.cfg, "finetune", None), "gpf", None)
-        gpf_monitor_train_loss = bool(getattr(gpf_cfg, "monitor_train_loss", False)) if gpf_cfg is not None else False
-
-        explicit_monitor_map = {
-            "train_loss": ("train_loss", "min"),
-            "val_loss": ("val_loss", "min"),
-            "test_loss": ("test_loss", "min"),
-            "train_acc": ("train_acc", "max"),
-            "val_acc": ("val_acc", "max"),
-            "test_acc": ("test_acc", "max"),
-            "train_auc": ("train_auc", "max"),
-            "val_auc": ("val_auc", "max"),
-            "test_auc": ("test_auc", "max"),
-            "train_micro_f1": ("train_micro_f1", "max"),
-            "val_micro_f1": ("val_micro_f1", "max"),
-            "test_micro_f1": ("test_micro_f1", "max"),
-            "train_macro_f1": ("train_macro_f1", "max"),
-            "val_macro_f1": ("val_macro_f1", "max"),
-            "test_macro_f1": ("test_macro_f1", "max"),
-            "train_mae": ("train_mae", "min"),
-            "val_mae": ("val_mae", "min"),
-            "test_mae": ("test_mae", "min"),
-            "train_mse": ("train_mse", "min"),
-            "val_mse": ("val_mse", "min"),
-            "test_mse": ("test_mse", "min"),
-        }
-
-        if monitor_metric in ("none", "disabled"):
-            self.monitor_name = None
-            self.monitor_mode = None
-        elif monitor_metric in explicit_monitor_map:
-            self.monitor_name, self.monitor_mode = explicit_monitor_map[monitor_metric]
-        elif monitor_metric != "auto":
-            supported = ", ".join(sorted(["auto", "none", "disabled", *explicit_monitor_map.keys()]))
-            raise ValueError(
-                f"Unsupported finetune.monitor_metric='{monitor_metric}'. "
-                f"Supported values: {supported}"
-            )
-        elif few_shot_no_val:
-            # Few-shot runs without validation weights have no val samples.
-            self.monitor_name = "train_loss"
-            self.monitor_mode = "min"
-        elif method_name in {"all_in_one", "gppt"} or (method_name == "gpf" and gpf_monitor_train_loss):
-            # Prompt-only methods default to early stopping on train loss.
-            self.monitor_name = "train_loss"
-            self.monitor_mode = "min"
-        elif task_level == "edge":
-            self.monitor_name = "val_auc"
-            self.monitor_mode = "max"
-        elif task_type == "classification" and label_dim > 1:
-            self.monitor_name = "val_auc"
-            self.monitor_mode = "max"
-        elif task_type == "regression":
-            self.monitor_name = "train_loss"
-            self.monitor_mode = "min"
-        else:
-            self.monitor_name = "val_acc"
-            self.monitor_mode = "max"
-
-        if self.monitor_name is None:
-            self.best_metric = float("inf")
-        else:
-            self.best_metric = float("-inf") if self.monitor_mode == "max" else float("inf")
+        spec = resolve_finetune_monitor_spec(
+            self.cfg,
+            task_level=str(getattr(self, "task_level_raw", self.cfg.finetune.dataset.task_level) or "").lower(),
+            label_dim=label_dim,
+            few_shot_without_validation=few_shot_no_val,
+            method_name=method_name,
+        )
+        self.monitor_name = spec.name
+        self.monitor_mode = spec.mode
+        self.best_metric = spec.best_metric
         self.best_epoch = None
         self.best_metrics: Dict[str, float] = {}
 
@@ -693,23 +630,17 @@ class FinetuneRunner:
         Falls back to `train_loss` when the requested metric is absent so runs
         can continue even when a split has no evaluable samples.
         """
-        if self.monitor_name is None or self.monitor_name == "train_loss":
-            return float(train_loss)
-        if self.monitor_name.startswith("train_"):
-            monitor_value = train_logs.get(self.monitor_name)
-        elif self.monitor_name.startswith("val_"):
-            monitor_value = val_metrics.get(self.monitor_name)
-        elif self.monitor_name.startswith("test_"):
-            monitor_value = test_metrics.get(self.monitor_name)
-        else:
-            monitor_value = val_metrics.get(self.monitor_name)
-        if monitor_value is None:
-            return float(train_loss)
-        return float(monitor_value)
+        return resolve_monitor_value(
+            self.monitor_name,
+            train_loss=train_loss,
+            train_logs=train_logs,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+        )
 
     def _monitor_uses_train_split(self) -> bool:
         """Train-only monitor metrics do not require validation passes."""
-        return bool(self.monitor_name) and str(self.monitor_name).startswith("train_")
+        return monitor_uses_train_split(self.monitor_name)
 
     def _save_best_checkpoint(
         self,

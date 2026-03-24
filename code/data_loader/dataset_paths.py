@@ -1,3 +1,9 @@
+"""Path helpers for dataset-scoped caches, split artifacts, and feature files.
+
+These helpers sanitize dataset names, avoid duplicate nesting, and recover the
+base dataset name for split-specific artifact directories.
+"""
+
 from pathlib import Path
 
 

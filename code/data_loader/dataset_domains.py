@@ -1,6 +1,7 @@
-"""
-Lightweight domain hints for common PyG datasets.
-The mapping prefers exact class/name matches before falling back to keywords.
+"""Coarse domain heuristics for dataset metadata and context generation.
+
+The mappings prefer exact dataset class and dataset-name matches, then fall
+back to keyword rules when no explicit hint is available.
 """
 
 # Direct mapping from dataset class name to a coarse domain string.

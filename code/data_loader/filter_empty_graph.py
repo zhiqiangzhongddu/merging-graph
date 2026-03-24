@@ -1,3 +1,5 @@
+"""Graph-level dataset filter to remove empty graph instances."""
+
 from pathlib import Path
 from typing import Dict, List, Tuple
 

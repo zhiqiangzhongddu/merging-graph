@@ -17,8 +17,13 @@ from code.data_loader import (
 )
 from code.model import build_encoder_from_cfg
 from code.pretrain.checkpoint import cfg_to_dict, save_checkpoint
+from code.pretrain.monitoring import resolve_pretrain_monitor_spec
 from code.pretrain.registry import build_pretrain_task
-from code.utils import compute_supervised_metrics, ensure_dir, format_split_for_name, set_seed
+from code.utils.metrics import compute_supervised_metrics
+from code.utils.monitoring import resolve_monitor_value
+from code.utils.naming import format_split_for_name
+from code.utils.paths import ensure_dir
+from code.utils.random import set_seed
 
 
 def _shared_split_root(cfg) -> str:
@@ -182,36 +187,17 @@ class PretrainRunner:
             )
 
     def _init_monitoring(self) -> None:
-        """Set monitoring mode and defaults based on the pretrain method."""
-        is_supervised = self.cfg.pretrain.method == "supervised"
-        method = str(getattr(self.cfg.pretrain, "method", "")).lower()
-        task_type = str(getattr(self.cfg.pretrain.dataset, "task_type", "classification") or "classification").lower()
-        task_level = str(getattr(self, "task_level_raw", self.cfg.pretrain.dataset.task_level) or "").lower()
+        """Resolve checkpoint monitoring for supervised and unsupervised pretraining."""
         label_dim = int(getattr(self.cfg.pretrain.dataset, "label_dim", 1) or 1)
 
-        if method == "context_pred":
-            # Baseline contextpred reports the balanced objective (loss_pos + loss_neg).
-            self.monitor_mode = "min"
-            self.monitor_name = "balanced_loss"
-        elif not is_supervised:
-            self.monitor_mode = "min"
-            self.monitor_name = "train_loss"
-        elif task_level == "edge":
-            # Link-prediction pretraining selection uses validation AUC.
-            self.monitor_mode = "max"
-            self.monitor_name = "val_auc"
-        elif task_type == "classification" and label_dim > 1:
-            # Multi-task binary classification (e.g., MoleculeNet) follows AUC selection.
-            self.monitor_mode = "max"
-            self.monitor_name = "val_auc"
-        elif task_type == "regression":
-            # Regression-style runs rely on loss for model selection.
-            self.monitor_mode = "min"
-            self.monitor_name = "train_loss"
-        else:
-            self.monitor_mode = "max"
-            self.monitor_name = "val_acc"
-        self.best_metric = float("-inf") if self.monitor_mode == "max" else float("inf")
+        spec = resolve_pretrain_monitor_spec(
+            self.cfg,
+            task_level=str(getattr(self, "task_level_raw", self.cfg.pretrain.dataset.task_level) or "").lower(),
+            label_dim=label_dim,
+        )
+        self.monitor_name = spec.name
+        self.monitor_mode = spec.mode
+        self.best_metric = spec.best_metric
         self.best_epoch = None
         self.best_metrics: Dict[str, float] = {}
 
@@ -370,17 +356,21 @@ class PretrainRunner:
         monitor_value: float,
     ) -> None:
         """Persist the best-performing checkpoint only."""
-        if not self._is_improved(monitor_value):
-            return
-
-        self.best_metric = monitor_value
-        self.best_epoch = epoch
+        if self.monitor_name is None:
+            self.best_metric = float(monitor_value)
+            self.best_epoch = epoch
+        else:
+            if not self._is_improved(monitor_value):
+                return
+            self.best_metric = float(monitor_value)
+            self.best_epoch = epoch
         metrics = {
             "train_loss": train_loss,
             "best_epoch": epoch,
-            self.monitor_name: monitor_value,
             **logs,
         }
+        if self.monitor_name is not None:
+            metrics[self.monitor_name] = float(monitor_value)
         # Ensure run directory exists and does not belong to another dataset/method.
         ensure_dir(self.run_dir)
         # Guard against accidental overwrite of a different run.
@@ -429,7 +419,10 @@ class PretrainRunner:
         self.best_metrics = metrics
         self._save_training_log()
         self._save_model_architecture()
-        print(f"[Best epoch updated] epoch={epoch} {self.monitor_name}={monitor_value:.4f}")
+        if self.monitor_name is None:
+            print(f"[Pretrain] Checkpoint updated at epoch={epoch} (monitor disabled).")
+        else:
+            print(f"[Best epoch updated] epoch={epoch} {self.monitor_name}={monitor_value:.4f}")
 
     def train_epoch(self, epoch: int) -> Tuple[float, Dict]:
         """Train the model for one epoch."""
@@ -570,17 +563,14 @@ class PretrainRunner:
                 }
             )
 
-            if self.monitor_name == "train_loss":
-                monitor_value = loss
-            else:
-                monitor_value = merged_metrics.get(self.monitor_name)
-                if monitor_value is None:
-                    monitor_value = loss
-            monitor_value = float(monitor_value)
-            if not math.isfinite(monitor_value):
-                monitor_value = float(loss)
-
-            improved = self._is_improved(monitor_value)
+            monitor_value = resolve_monitor_value(
+                self.monitor_name,
+                train_loss=loss,
+                train_logs=logs,
+                val_metrics=val_metrics,
+                test_metrics=test_metrics,
+            )
+            improved = True if self.monitor_name is None else self._is_improved(monitor_value)
             self._save_best_checkpoint(
                 epoch=epoch,
                 train_loss=loss,
@@ -614,7 +604,11 @@ class PretrainRunner:
             self.best_metric = self.best_metric if self.best_metric is not None else float("inf")
             print(f"[Pretrain] No best checkpoint was saved; wrote last state to {self._checkpoint_path()}")
 
-        print(f"Pretraining complete. Best {self.monitor_name}: {self.best_metric:.4f} at epoch {self.best_epoch}.")
+        if self.monitor_name is not None:
+            print(f"Pretraining complete. Best {self.monitor_name}: {self.best_metric:.4f} at epoch {self.best_epoch}.")
+        else:
+            final_epoch = self.train_history[-1]["epoch"] if self.train_history else 0
+            print(f"[Pretrain] Complete. Final epoch: {final_epoch} (early stopping disabled).")
         if hasattr(self, "best_metrics"):
             for metric_name in ("test_acc", "test_micro_f1", "test_macro_f1", "test_auc", "test_mae", "test_mse"):
                 metric_value = self.best_metrics.get(metric_name)

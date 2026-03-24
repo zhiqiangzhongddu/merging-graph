@@ -1,11 +1,11 @@
-# AnyGraphAnyExpert
+# Merging graph
 
 ## Environment set up
 
 ```bash
 # create a new environment
-conda create -n agae -y python=3.10
-conda activate agae
+conda create -n merging-graph -y python=3.10
+conda activate merging-graph
 
 # install pytorch
 pip install torch==2.1.1 --index-url https://download.pytorch.org/whl/cu118
@@ -35,7 +35,7 @@ pip install torch-cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.1.1+cu118.h
 ```bash
 # prepare selected datasets
 python run_data_preparation.py \
-  data_preparation.target_datasets "actor,bace,cora,ogbn-arxiv,ogbn-products,qm7b,zinc,zinc15"
+  data_preparation.target_datasets "bace,bbbp,tox21,toxcast"
 
 # prepare all available node/edge datasets
 python run_data_preparation.py \
@@ -60,50 +60,90 @@ We use 9 expert models across 4 categories:
 ## Training
 
 ```bash
-# supervised: node dataset, node-level task
+# supervised: node dataset, node-level classification task
 python run_train.py \
   model.name gcn \
   train.dataset.name cora \
   train.dataset.task_level node \
   train.dataset.induced True \
+  train.dataset.task_type classification \
   train.dataset.fixed_split "(0.8,0.1,0.1)" \
   train.num_runs 5 \
   device 0
 
-# supervised: node dataset, edge-level task
+# supervised: node dataset, edge-level classification task
 python run_train.py \
   model.name gcn \
   train.dataset.name cora \
   train.dataset.task_level edge \
   train.dataset.induced True \
+  train.dataset.task_type classification \
   train.dataset.fixed_split "(0.1,0.05,0.1)" \
   train.num_runs 5 \
   device 0
 
-# supervised: graph-level task
+# supervised: graph-level single-label classification task
 python run_train.py \
   model.name gcn \
   train.dataset.name bace \
   train.dataset.task_level graph \
+  train.dataset.induced False \
+  train.dataset.task_type classification \
   train.dataset.fixed_split "(0.8,0.1,0.1)" \
   train.num_runs 5 \
   device 0
 
-# few-shot: node classification
+# supervised: graph-level multiple-label classification task
+python run_train.py \
+  model.name gcn \
+  train.dataset.name tox21 \
+  train.dataset.task_level graph \
+  train.dataset.induced False \
+  train.dataset.task_type classification \
+  train.dataset.fixed_split "(0.8,0.1,0.1)" \
+  train.num_runs 5 \
+  device 0
+
+# supervised: graph-level regression task
+python run_train.py \
+  model.name gcn \
+  train.dataset.name esol \
+  train.dataset.task_level graph \
+  train.dataset.induced False \
+  train.dataset.task_type regression \
+  train.dataset.fixed_split "(0.8,0.1,0.1)" \
+  train.num_runs 5 \
+  device 0
+
+# few-shot: node dataset, node-level classification task
 python run_train.py \
   model.name gcn \
   train.dataset.name cora \
   train.dataset.task_level node \
   train.dataset.induced True \
+  train.dataset.task_type classification \
   train.dataset.fixed_split "(100,0.0,1.0)" \
   train.num_runs 5 \
   device 0
 
-# few-shot: graph classification
+# few-shot: graph-level single-label classification task
 python run_train.py \
   model.name gcn \
   train.dataset.name bace \
   train.dataset.task_level graph \
+  train.dataset.induced False \
+  train.dataset.task_type classification \
+  train.dataset.fixed_split "(5,0.0,1.0)" \
+  train.num_runs 5 \
+  device 0
+
+# few-shot: graph-level multiple-label classification task
+python run_train.py \
+  model.name gcn \
+  train.dataset.name tox21 \
+  train.dataset.task_level graph \
+  train.dataset.induced False \
+  train.dataset.task_type classification \
   train.dataset.fixed_split "(5,0.0,1.0)" \
   train.num_runs 5 \
   device 0
@@ -124,36 +164,64 @@ Supported 7 pretraining methods:
 
 Run a single pre-training job from the project root:
 ```bash
-# attr_masking / context_pred / dgi / edge_pred / graphcl / infograph
-# zinc
-python run_pretrain.py \
-  model.name gin \
-  pretrain.dataset.name zinc \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.induced False \
-  pretrain.method edge_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 256 \
-  device 0
-# zinc15
-python run_pretrain.py \
-  model.name gin \
-  pretrain.dataset.name zinc15 \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.induced False \
-  pretrain.method edge_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 512 \
-  device 0
-
-# supervised
+# attr_masking / context_pred / dgi / edge_pred / graphcl / infograph - node dataset
 python run_pretrain.py \
   model.name gcn \
   pretrain.dataset.name cora \
   pretrain.dataset.task_level node \
   pretrain.dataset.induced True \
+  pretrain.method edge_pred \
+  device 0
+
+# attr_masking / context_pred / dgi / edge_pred / graphcl / infograph - graph dataset
+python run_pretrain.py \
+  model.name gcn \
+  pretrain.dataset.name bace \
+  pretrain.dataset.task_level graph \
+  train.dataset.induced False \
+  pretrain.method edge_pred \
+  device 0
+
+# supervised - node dataset
+python run_pretrain.py \
+  model.name gcn \
+  pretrain.dataset.name cora \
+  pretrain.dataset.task_level node \
+  pretrain.dataset.induced True \
+  pretrain.dataset.task_type classification \
+  pretrain.method supervised \
+  pretrain.dataset.fixed_split "(0.8,0.1,0.1)" \
+  device 0
+
+# supervised: graph-level single-label classification task
+python run_pretrain.py \
+  model.name gcn \
+  pretrain.dataset.name bace \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.induced False \
+  pretrain.dataset.task_type classification \
+  pretrain.method supervised \
+  pretrain.dataset.fixed_split "(0.8,0.1,0.1)" \
+  device 0
+
+# supervised: graph-level multiple-label classification task
+python run_pretrain.py \
+  model.name gcn \
+  pretrain.dataset.name tox21 \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.induced False \
+  pretrain.dataset.task_type classification \
+  pretrain.method supervised \
+  pretrain.dataset.fixed_split "(0.8,0.1,0.1)" \
+  device 0
+
+# supervised: graph-level regression task
+python run_pretrain.py \
+  model.name gcn \
+  pretrain.dataset.name esol \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.induced False \
+  pretrain.dataset.task_type regression \
   pretrain.method supervised \
   pretrain.dataset.fixed_split "(0.8,0.1,0.1)" \
   device 0
@@ -180,19 +248,16 @@ Supported 9 fine-tuning methods:
 ```bash
 # supervised
 python run_finetune.py \
-  model.name gin \
-  pretrain.dataset.name zinc \
-  pretrain.dataset.task_level graph \
-  pretrain.dataset.induced False \
+  model.name gcn \
+  pretrain.dataset.name cora \
+  pretrain.dataset.task_level node \
+  pretrain.dataset.induced True \
   pretrain.method edge_pred \
-  pretrain.epochs 100 \
-  pretrain.early_stopping 100 \
-  pretrain.batch_size 256 \
-  finetune.dataset.name tox21 \
-  finetune.dataset.task_level graph \
-  finetune.dataset.induced False \
+  finetune.dataset.name cora \
+  finetune.dataset.task_level node \
+  finetune.dataset.induced True \
   finetune.method supervised \
-  finetune.dataset.fixed_split "(0.8,0.1,0.1)" \
+  finetune.dataset.fixed_split "(100,0.0,1.0)" \
   device 0
 
 # all_in_one

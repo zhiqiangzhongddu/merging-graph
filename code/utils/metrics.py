@@ -1,98 +1,11 @@
-import os
-import random
-from numbers import Integral
+"""Shared supervised metric helpers."""
+
+from __future__ import annotations
+
 from typing import Dict
+
 import numpy as np
 import torch
-
-
-def ensure_dir(path: str):
-    """Ensure that a directory exists."""
-    os.makedirs(path, exist_ok=True)
-
-
-def format_split_for_name(split) -> str:
-    """
-    Format a split tuple for inclusion in filenames, e.g., (0.8,0.1,0.1) -> "split80-10-10".
-    Returns an empty string when split is None or not iterable.
-    """
-    try:
-        parts = list(split)
-    except Exception:
-        return ""
-
-    if not parts:
-        return ""
-
-    first = parts[0]
-    if isinstance(first, Integral) and not isinstance(first, bool):
-        val_ratio = parts[1] if len(parts) > 1 else 0.0
-        test_ratio = parts[2] if len(parts) > 2 else 0.0
-        try:
-            val_pct = int(round(float(val_ratio) * 100))
-            test_pct = int(round(float(test_ratio) * 100))
-        except Exception:
-            val_pct, test_pct = 0, 0
-        return f"fewshot{first}-{val_pct}-{test_pct}"
-
-    try:
-        numeric = [float(p) for p in parts]
-    except Exception:
-        return ""
-    suffix = "-".join(str(int(round(p * 100))) for p in numeric)
-    return f"split{suffix}"
-
-
-def build_run_name_from_cfg(cfg) -> str:
-    """Mirror the pretrainer run-name convention using the current cfg."""
-    dataset_cfg = getattr(getattr(cfg, "pretrain", None), "dataset", None) or getattr(cfg, "dataset", None)
-    model_cfg = getattr(cfg, "model", None)
-    pretrain_cfg = getattr(cfg, "pretrain", None)
-    split = getattr(dataset_cfg, "fixed_split", None) if dataset_cfg else None
-
-    dataset_name = getattr(dataset_cfg, "name", "dataset") if dataset_cfg else "dataset"
-    induced_flag = int(getattr(dataset_cfg, "induced", False)) if dataset_cfg else 0
-    task_level = getattr(dataset_cfg, "task_level", "") if dataset_cfg else ""
-    model_name = getattr(model_cfg, "name", "model") if model_cfg else "model"
-    hidden_dim = getattr(model_cfg, "hidden_dim", "")
-    out_dim = getattr(model_cfg, "out_dim", "")
-    num_layers = getattr(model_cfg, "num_layers", "")
-    epochs = getattr(pretrain_cfg, "epochs", "")
-    lr = getattr(pretrain_cfg, "lr", "")
-    batch_size = getattr(pretrain_cfg, "batch_size", "")
-    seed = getattr(cfg, "seed", "")
-    method = getattr(pretrain_cfg, "method", "method") if pretrain_cfg else "method"
-    split_tag = format_split_for_name(split) if str(method).lower() == "supervised" else ""
-
-    parts = [
-        method,
-        dataset_name,
-        f"task{task_level}",
-        f"induced{induced_flag}",
-        split_tag,
-        model_name,
-        f"h{hidden_dim}",
-        f"o{out_dim}",
-        f"l{num_layers}",
-        f"e{epochs}",
-        f"lr{lr:g}" if isinstance(lr, (int, float)) else f"lr{lr}" if lr != "" else "",
-        f"bs{batch_size}",
-        f"seed{seed}",
-    ]
-    return "_".join(str(p) for p in parts if p not in ("", None))
-
-
-def set_seed(seed: int = 42):
-    os.environ['PYTHONHASHSEED'] = str(seed)
-
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 def _classification_labels(labels: torch.Tensor) -> torch.Tensor:
@@ -160,6 +73,35 @@ def _safe_auc(y_true: np.ndarray, probs: np.ndarray) -> float:
         return float("nan")
 
 
+def _safe_macro_multilabel_auc(
+    target: np.ndarray,
+    probs: np.ndarray,
+    valid: np.ndarray,
+) -> float:
+    """Return unweighted mean ROC-AUC across evaluable multilabel tasks."""
+    try:
+        target_np = np.asarray(target)
+        probs_np = np.asarray(probs)
+        valid_np = np.asarray(valid, dtype=bool)
+    except Exception:
+        return float("nan")
+
+    if target_np.ndim != 2 or probs_np.ndim != 2 or valid_np.ndim != 2:
+        return float("nan")
+    if target_np.shape != probs_np.shape or target_np.shape != valid_np.shape:
+        return float("nan")
+
+    auc_vals = []
+    for tid in range(target_np.shape[1]):
+        mask = valid_np[:, tid]
+        if not np.any(mask):
+            continue
+        auc_task = _safe_auc(target_np[mask, tid], probs_np[mask, tid])
+        if not np.isnan(auc_task):
+            auc_vals.append(float(auc_task))
+    return float(np.mean(auc_vals)) if auc_vals else float("nan")
+
+
 def compute_supervised_metrics(
     logits: torch.Tensor,
     labels: torch.Tensor,
@@ -185,7 +127,6 @@ def compute_supervised_metrics(
         mae = float(diff.abs().mean().item())
         return {"mse": mse, "mae": mae}
 
-    # Multi-task binary classification.
     if (
         logits.dim() == 2
         and labels.dim() == 2
@@ -201,7 +142,6 @@ def compute_supervised_metrics(
         denom = valid_f.sum().clamp(min=1.0)
         acc = float((((preds == target).float() * valid_f).sum() / denom).item())
 
-        # Flattened micro-F1 over all valid task labels.
         valid_flat = valid.view(-1)
         y_true_flat = target.view(-1)[valid_flat].long().numpy() if valid_flat.any() else np.array([], dtype=np.int64)
         y_pred_flat = preds.view(-1)[valid_flat].long().numpy() if valid_flat.any() else np.array([], dtype=np.int64)
@@ -210,9 +150,7 @@ def compute_supervised_metrics(
         else:
             micro_f1 = _safe_f1(y_true_flat, y_pred_flat)["micro_f1"]
 
-        # Macro-F1 averaged across tasks with at least one valid label.
         macro_f1_vals = []
-        auc_vals = []
         probs_np = probs.numpy()
         target_np = target.numpy()
         valid_np = valid.numpy()
@@ -225,16 +163,9 @@ def compute_supervised_metrics(
             f1_task = _safe_f1(y_t.astype(np.int64), y_p)["macro_f1"]
             if not np.isnan(f1_task):
                 macro_f1_vals.append(float(f1_task))
-            if np.unique(y_t).size >= 2:
-                try:
-                    from sklearn.metrics import roc_auc_score  # pylint: disable=import-outside-toplevel
-
-                    auc_vals.append(float(roc_auc_score(y_t, probs_np[mask, tid])))
-                except Exception:
-                    pass
 
         macro_f1 = float(np.mean(macro_f1_vals)) if macro_f1_vals else float("nan")
-        auc = float(np.mean(auc_vals)) if auc_vals else float("nan")
+        auc = _safe_macro_multilabel_auc(target=target_np, probs=probs_np, valid=valid_np)
         return {
             "acc": acc,
             "micro_f1": micro_f1,
@@ -283,10 +214,10 @@ def compute_supervised_metrics(
             "macro_f1": float("nan"),
             "auc": float("nan"),
         }
-    else:
-        probs_tensor = torch.softmax(logits, dim=-1)
-        y_pred = probs_tensor.argmax(dim=-1)
-        probs = probs_tensor.numpy()
+
+    probs_tensor = torch.softmax(logits, dim=-1)
+    y_pred = probs_tensor.argmax(dim=-1)
+    probs = probs_tensor.numpy()
 
     y_true_np = y_true.numpy()
     y_pred_np = y_pred.numpy()
@@ -299,3 +230,6 @@ def compute_supervised_metrics(
         "macro_f1": float(f1["macro_f1"]),
         "auc": float(auc),
     }
+
+
+__all__ = ["compute_supervised_metrics"]

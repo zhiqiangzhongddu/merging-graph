@@ -1,3 +1,5 @@
+"""Feature processing utilities for SVD-based dimensionality reduction and caching."""
+
 from pathlib import Path
 from typing import Optional, Tuple
 

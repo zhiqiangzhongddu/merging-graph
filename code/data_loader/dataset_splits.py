@@ -1,3 +1,5 @@
+"""Dataset splitting utilities for node-level, edge-level, and graph-level datasets, including support for fixed random splits, few-shot splits, and edge splits with negative sampling. Provides functions to create or load split indices and payloads, ensuring reproducibility and efficient caching of splits on disk."""
+
 import re
 from numbers import Integral
 from pathlib import Path

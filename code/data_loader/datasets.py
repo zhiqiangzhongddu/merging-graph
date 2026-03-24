@@ -1,7 +1,9 @@
+"""Dataset loading and processing utilities for node-level, edge-level, and graph-level datasets with support for induced subgraph generation and SVD-based feature reduction."""
+
 import contextlib
 from pathlib import Path
-from typing import List, Optional, Tuple
 import warnings
+from typing import Tuple
 
 import torch
 from torch.utils.data import Subset
@@ -76,7 +78,6 @@ from .induced_graphs import (
     _induced_cache_path,
     _load_induced_cache,
     _save_induced_cache,
-    build_edge_induced_graphs,
     build_edge_induced_graphs_supervised,
     build_induced_graphs,
 )
@@ -87,6 +88,21 @@ from .svd_features import (
     compute_subgraph_svd_features,
 )
 from .zinc15_dataset import ZINC15Dataset
+
+
+__all__ = [
+    "SingleGraphDataLoader",
+    "compute_subgraph_svd_features",
+    "create_dataset",
+    "dataset_info",
+    "get_basic_dataset_info",
+    "infer_task_level",
+    "is_regression_dataset",
+    "log_split_instance_counts",
+    "make_loaders",
+    "resolve_count_split_strategy",
+    "split_instance_counts",
+]
 
 
 # Keep logs clean when third-party internals still touch InMemoryDataset.data.

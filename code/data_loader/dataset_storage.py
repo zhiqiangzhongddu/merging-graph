@@ -1,3 +1,5 @@
+"""Utilities for accessing and modifying the underlying data storage of PyG datasets, including support for unwrapping Subset datasets to access their base data storage."""
+
 def _get_dataset_data_storage(dataset):
     """Return the underlying PyG Data storage for datasets that expose one."""
     data_obj = getattr(dataset, "data", None)
