@@ -14,6 +14,7 @@ from code.finetune.prompts.graphprompt import (
     compute_class_centers,
 )
 from code.finetune.registry import register
+from code.finetune.task_heads import TaskAwareObjective, build_task_aware_classifier
 from code.finetune.task_base import FinetuneTask
 from code.pretrain.methods.utils import get_batch_vector, pool_nodes
 from code.utils import compute_supervised_metrics
@@ -32,11 +33,6 @@ class FinetuneGraphPrompt(FinetuneTask):
         self.task_type = str(getattr(ds_cfg, "task_type", "classification") or "classification").lower()
         self.label_dim = int(getattr(ds_cfg, "label_dim", 1) or 1)
         self.num_classes = max(2, int(getattr(ds_cfg, "num_classes", 2) or 2))
-
-        if self.task_type != "classification":
-            raise ValueError("GraphPrompt currently supports classification tasks only.")
-        if self.label_dim > 1:
-            raise ValueError("GraphPrompt currently supports single-label classification only.")
         if self.task_level == "edge":
             raise ValueError("GraphPrompt requires node/graph batches. Set finetune.dataset.induced=True for edge tasks.")
         if self.task_level_raw == "node" and self.is_induced:
@@ -48,6 +44,8 @@ class FinetuneGraphPrompt(FinetuneTask):
         hidden_dim = int(getattr(cfg.model, "hidden_dim", 1) or 1)
         out_dim = int(getattr(cfg.model, "out_dim", hidden_dim) or hidden_dim)
         self.repr_dim = out_dim
+        self.objective = TaskAwareObjective(cfg, task_level=self.task_level, repr_dim=self.repr_dim)
+        self.single_label_classification = self.objective.is_single_label_classification
 
         method_cfg = getattr(cfg.finetune, "graphprompt", None)
         self.use_plus = bool(getattr(method_cfg, "plus", False)) if method_cfg else False
@@ -119,11 +117,24 @@ class FinetuneGraphPrompt(FinetuneTask):
                 init=self.prompt_init,
                 init_std=self.prompt_init_std,
             )
+        if self.single_label_classification:
+            self.classifier = None
+        else:
+            self.classifier = build_task_aware_classifier(
+                input_dim=self.repr_dim,
+                task_type=self.task_type,
+                label_dim=self.label_dim,
+                num_classes=self.objective.num_classes,
+            )
         self.latest_centers: Optional[torch.Tensor] = None
         self.prototype_bank: Optional[torch.Tensor] = None
+        self._generalized_notice_printed = False
 
     def parameters_to_optimize(self):
-        return self.prompt.parameters()
+        params = list(self.prompt.parameters())
+        if self.classifier is not None:
+            params.extend(self.classifier.parameters())
+        return params
 
     def build_optimizers(self, model: nn.Module):
         method_cfg = getattr(self.cfg.finetune, "graphprompt", None)
@@ -146,6 +157,14 @@ class FinetuneGraphPrompt(FinetuneTask):
                 "weight_decay": prompt_wd,
             }
         ]
+        if self.classifier is not None:
+            param_groups.append(
+                {
+                    "params": list(self.classifier.parameters()),
+                    "lr": prompt_lr,
+                    "weight_decay": prompt_wd,
+                }
+            )
         encoder_params = [param for param in model.parameters() if param.requires_grad] if self.update_pretrained else []
         if encoder_params:
             param_groups.append(
@@ -252,9 +271,10 @@ class FinetuneGraphPrompt(FinetuneTask):
             mask = getattr(data, mask_attr, None)
             if mask is None:
                 mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
-            labels = self._prepare_labels(data.y[mask]).to(device)
+            # Keep the same task-aware label handling as the non-plus path.
+            labels = self._prepare_task_labels(data.y[mask]).to(device)
         else:
-            labels = self._prepare_labels(data.y).to(device)
+            labels = self._prepare_task_labels(data.y).to(device)
 
         mixed_embeddings = None
         for stage_id, coeff in self.prompt.iter_stage_coefficients():
@@ -318,6 +338,14 @@ class FinetuneGraphPrompt(FinetuneTask):
                 labels = (labels > 0.5).to(labels.dtype)
         return labels.long()
 
+    def _prepare_task_labels(self, labels: torch.Tensor) -> torch.Tensor:
+        labels = torch.as_tensor(labels)
+        if self.single_label_classification:
+            return self._prepare_labels(labels)
+        if labels.dim() == 0:
+            return labels.view(1)
+        return labels
+
     def _extract_embeddings_and_labels(
         self,
         model: nn.Module,
@@ -352,7 +380,7 @@ class FinetuneGraphPrompt(FinetuneTask):
             mask = getattr(data, mask_attr, None)
             if mask is None:
                 mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
-            labels = self._prepare_labels(data.y[mask]).to(device)
+            labels = self._prepare_task_labels(data.y[mask]).to(device)
             embeddings = prompted_node_repr[mask]
         else:
             if self.graph_pooling_mode == "encoder":
@@ -378,10 +406,16 @@ class FinetuneGraphPrompt(FinetuneTask):
                 )
             if apply_prompt_dropout and self.prompt_dropout > 0.0:
                 graph_repr = F.dropout(graph_repr, p=self.prompt_dropout, training=True)
-            labels = self._prepare_labels(data.y).to(device)
+            labels = self._prepare_task_labels(data.y).to(device)
             embeddings = graph_repr
 
         return embeddings, labels
+
+    def _maybe_print_generalized_notice(self) -> None:
+        if self.single_label_classification or self._generalized_notice_printed:
+            return
+        print("[Finetune][GraphPrompt] Using task-aware prediction head for multi-label/regression finetuning.")
+        self._generalized_notice_printed = True
 
     def _similarity_logits(self, embeddings: torch.Tensor, centers: torch.Tensor, is_train: bool) -> torch.Tensor:
         if self.score_mode == "cosine":
@@ -462,6 +496,45 @@ class FinetuneGraphPrompt(FinetuneTask):
         optimizer = optimizers.get("primary") if isinstance(optimizers, dict) else optimizers
         if optimizer is None:
             raise ValueError("GraphPrompt requires an optimizer.")
+
+        if not self.single_label_classification:
+            self._maybe_print_generalized_notice()
+            self._set_encoder_train_mode(model)
+            self.prompt.train()
+            if self.classifier is not None:
+                self.classifier.train()
+
+            total_loss = 0.0
+            total_primary = 0.0
+            num_batches = 0
+            for data in loader:
+                optimizer.zero_grad()
+                embeddings, labels = self._extract_embeddings_and_labels(
+                    model=model,
+                    data=data,
+                    device=device,
+                    mask_attr="train_mask",
+                    apply_prompt_dropout=True,
+                )
+                if embeddings.numel() == 0:
+                    continue
+                loss, primary, _logits, _labels = self.objective.forward_with_classifier(
+                    classifier=self.classifier,
+                    representations=embeddings,
+                    labels=labels,
+                    input_dim=self.repr_dim,
+                    return_outputs=True,
+                )
+                loss.backward()
+                optimizer.step()
+                total_loss += float(loss.item())
+                total_primary += float(primary)
+                num_batches += 1
+
+            if num_batches == 0:
+                return 0.0, {}
+            metric_name = "train_mae" if self.task_type == "regression" else "train_acc"
+            return total_loss / num_batches, {metric_name: total_primary / num_batches}
 
         self._set_encoder_train_mode(model)
         self.prompt.train()
@@ -557,6 +630,8 @@ class FinetuneGraphPrompt(FinetuneTask):
         return mean_loss, {"train_acc": total_acc / num_batches}
 
     def on_epoch_end(self, model: nn.Module, loader, device):
+        if not self.single_label_classification:
+            return None
         self.latest_centers = self._compute_reference_centers(
             model=model,
             loader=loader,
@@ -568,6 +643,65 @@ class FinetuneGraphPrompt(FinetuneTask):
         return None
 
     def evaluate_split(self, model, loader, device, prefix: str, mask_attr: str) -> Dict[str, float]:
+        if not self.single_label_classification:
+            model.eval()
+            self.prompt.eval()
+            if self.classifier is not None:
+                self.classifier.eval()
+
+            total_loss = 0.0
+            num_batches = 0
+            all_logits = []
+            all_labels = []
+
+            with torch.no_grad():
+                for data in loader:
+                    embeddings, labels = self._extract_embeddings_and_labels(
+                        model=model,
+                        data=data,
+                        device=device,
+                        mask_attr=mask_attr,
+                        apply_prompt_dropout=False,
+                    )
+                    if embeddings.numel() == 0:
+                        continue
+                    loss, _primary, logits, labels = self.objective.forward_with_classifier(
+                        classifier=self.classifier,
+                        representations=embeddings,
+                        labels=labels,
+                        input_dim=self.repr_dim,
+                        return_outputs=True,
+                    )
+                    total_loss += float(loss.item())
+                    num_batches += 1
+                    all_logits.append(logits.detach().cpu())
+                    all_labels.append(labels.detach().cpu())
+
+            if num_batches == 0:
+                return {}
+
+            metrics = {
+                f"{prefix}_loss": total_loss / num_batches,
+            }
+            if all_logits and all_labels:
+                logits = torch.cat(all_logits, dim=0)
+                if any(y.dim() > 1 for y in all_labels):
+                    labels = torch.cat(
+                        [y.view(-1, 1) if y.dim() == 1 else y.view(y.size(0), -1) for y in all_labels],
+                        dim=0,
+                    )
+                    if labels.dim() == 2 and labels.size(1) == 1:
+                        labels = labels.view(-1)
+                else:
+                    labels = torch.cat([y.view(-1) for y in all_labels], dim=0)
+                for key, value in compute_supervised_metrics(
+                    logits=logits,
+                    labels=labels,
+                    task_type=self.task_type,
+                ).items():
+                    metrics[f"{prefix}_{key}"] = float(value)
+            return metrics
+
         model.eval()
         self.prompt.eval()
 

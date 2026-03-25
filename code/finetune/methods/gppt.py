@@ -10,8 +10,9 @@ from torch import nn
 
 from code.finetune.prompts.gppt import GPPTPrompt
 from code.finetune.registry import register
+from code.finetune.task_heads import TaskAwareObjective
 from code.finetune.task_base import FinetuneTask
-from code.pretrain.methods.utils import get_batch_vector
+from code.pretrain.methods.utils import get_batch_vector, pool_nodes
 from code.utils import compute_supervised_metrics
 
 
@@ -23,14 +24,14 @@ class FinetuneGPPT(FinetuneTask):
         super().__init__(cfg)
         ds_cfg = cfg.finetune.dataset
         self.task_level = str(getattr(ds_cfg, "task_level", "graph") or "graph").lower()
-        self.task_type = str(getattr(ds_cfg, "task_type", "classification") or "classification").lower()
-        self.label_dim = int(getattr(ds_cfg, "label_dim", 1) or 1)
+        hidden_dim = int(getattr(cfg.model, "hidden_dim", 1) or 1)
+        self.repr_dim = int(getattr(cfg.model, "out_dim", hidden_dim) or hidden_dim)
+        self.objective = TaskAwareObjective(cfg, task_level=self.task_level, repr_dim=self.repr_dim)
+        self.task_type = self.objective.task_type
+        self.label_dim = self.objective.label_dim
         self.num_classes = max(2, int(getattr(ds_cfg, "num_classes", 2) or 2))
-
-        if self.task_type != "classification":
-            raise ValueError("GPPT currently supports classification tasks only.")
-        if self.label_dim > 1:
-            raise ValueError("GPPT currently supports single-label classification only.")
+        self.single_label_classification = self.objective.is_single_label_classification
+        self.task_output_dim = self.objective.output_dim
         if self.task_level == "edge":
             raise ValueError("GPPT requires node/graph batches. Set finetune.dataset.induced=True for edge tasks.")
 
@@ -39,10 +40,7 @@ class FinetuneGPPT(FinetuneTask):
         if raw_center_num > 0:
             center_num = raw_center_num
         else:
-            center_num = self.num_classes
-
-        hidden_dim = int(getattr(cfg.model, "hidden_dim", 1) or 1)
-        self.repr_dim = int(getattr(cfg.model, "out_dim", hidden_dim) or hidden_dim)
+            center_num = self.num_classes if self.single_label_classification else max(1, self.label_dim)
         self.constraint_weight = (
             float(getattr(method_cfg, "constraint_weight", 1e-2)) if method_cfg is not None else 1e-2
         )
@@ -70,6 +68,7 @@ class FinetuneGPPT(FinetuneTask):
             in_channels=self.repr_dim,
             center_num=center_num,
             num_classes=self.num_classes,
+            output_dim=self.task_output_dim,
             structure_mode=structure_mode,
             task_mode=task_mode,
             add_self_loops_in_conv=(
@@ -83,8 +82,10 @@ class FinetuneGPPT(FinetuneTask):
             ),
             kmeans_random_state=int(getattr(method_cfg, "kmeans_random_state", 0)) if method_cfg is not None else 0,
             kmeans_n_init=int(getattr(method_cfg, "kmeans_n_init", 10)) if method_cfg is not None else 10,
+            use_prototype_init=self.single_label_classification,
         )
         self._prompt_initialized = False
+        self._generalized_notice_printed = False
 
     @staticmethod
     def _to_bool(value) -> bool:
@@ -109,7 +110,7 @@ class FinetuneGPPT(FinetuneTask):
         return torch.cat([x, pad], dim=-1)
 
     @staticmethod
-    def _prepare_labels(labels: torch.Tensor) -> torch.Tensor:
+    def _prepare_single_label_labels(labels: torch.Tensor) -> torch.Tensor:
         labels = torch.as_tensor(labels)
         if labels.dim() > 1:
             labels = labels.view(labels.size(0), -1)[:, 0]
@@ -122,6 +123,14 @@ class FinetuneGPPT(FinetuneTask):
             else:
                 labels = (labels > 0.5).to(labels.dtype)
         return labels.long()
+
+    def _prepare_labels(self, labels: torch.Tensor) -> torch.Tensor:
+        labels = torch.as_tensor(labels)
+        if self.single_label_classification:
+            return self._prepare_single_label_labels(labels)
+        if labels.dim() == 0:
+            return labels.view(1)
+        return labels
 
     @staticmethod
     def _match_label_size(labels: torch.Tensor, target_size: int) -> torch.Tensor:
@@ -206,6 +215,12 @@ class FinetuneGPPT(FinetuneTask):
         votes = node_logits.new_zeros((num_graphs, self.num_classes))
         votes.scatter_add_(0, batch.view(-1, 1).expand_as(one_hot), one_hot)
         return votes
+
+    def _maybe_print_generalized_notice(self) -> None:
+        if self.single_label_classification or self._generalized_notice_printed:
+            return
+        print("[Finetune][gppt] Using generalized token outputs for multi-label/regression finetuning.")
+        self._generalized_notice_printed = True
 
     def _node_forward(
         self,
@@ -299,6 +314,84 @@ class FinetuneGPPT(FinetuneTask):
             structure_for_update = structure_for_update.detach()
         return loss, acc, graph_logits, graph_labels, structure_for_update
 
+    def _node_forward_generalized(
+        self,
+        model: nn.Module,
+        data,
+        device: torch.device,
+        mask_attr: str,
+    ) -> Optional[Tuple[torch.Tensor, float, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]]:
+        data = data.to(device)
+        edge_index = getattr(data, "edge_index", None)
+        if edge_index is None:
+            raise ValueError("GPPT requires edge_index for node-level tuning.")
+
+        node_repr, _ = model(data)
+        node_repr = self._align_last_dim(node_repr, self.repr_dim)
+        node_logits = self.prompt(node_repr, edge_index)
+
+        mask = getattr(data, mask_attr, None)
+        if mask is None:
+            mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
+        else:
+            mask = torch.as_tensor(mask, dtype=torch.bool, device=device).view(-1)
+            if mask.numel() > data.num_nodes:
+                mask = mask[: data.num_nodes]
+            elif mask.numel() < data.num_nodes:
+                pad = torch.zeros(data.num_nodes - mask.numel(), dtype=torch.bool, device=device)
+                mask = torch.cat([mask, pad], dim=0)
+        if not bool(mask.any().item()):
+            return None
+
+        labels = torch.as_tensor(data.y)
+        if labels.dim() > 1 and labels.size(0) == data.num_nodes:
+            labels_used = labels[mask]
+        else:
+            labels_used = labels.view(-1)[mask]
+        loss, primary, logits_used, labels_used = self.objective.loss_from_logits(
+            logits=node_logits[mask],
+            labels=labels_used.to(device),
+            return_outputs=True,
+        )
+        structure_for_update = self.prompt.get_mid_h()
+        if structure_for_update is not None:
+            if self.update_structure_from_mask:
+                structure_for_update = structure_for_update[mask]
+            structure_for_update = structure_for_update.detach()
+        return loss, primary, logits_used, labels_used, structure_for_update
+
+    def _graph_forward_generalized(
+        self,
+        model: nn.Module,
+        data,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, float, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        data = data.to(device)
+        edge_index = getattr(data, "edge_index", None)
+        if edge_index is None:
+            raise ValueError("GPPT requires edge_index for graph-level tuning.")
+
+        node_repr, _ = model(data)
+        node_repr = self._align_last_dim(node_repr, self.repr_dim)
+        node_logits = self.prompt(node_repr, edge_index)
+        batch = get_batch_vector(data).long()
+        graph_logits = pool_nodes(
+            x=node_logits,
+            batch=batch,
+            mode="mean",
+            data=data,
+        )
+        labels = torch.as_tensor(data.y).to(device)
+        loss, primary, graph_logits, labels = self.objective.loss_from_logits(
+            logits=graph_logits,
+            labels=labels,
+            return_outputs=True,
+        )
+        structure_for_update = self.prompt.get_mid_h()
+        if structure_for_update is not None:
+            structure_for_update = structure_for_update.detach()
+        return loss, primary, graph_logits, labels, structure_for_update
+
     def _maybe_initialize_prompt(self, model: nn.Module, loader, device: torch.device) -> None:
         if self._prompt_initialized:
             return
@@ -328,7 +421,14 @@ class FinetuneGPPT(FinetuneTask):
                 edge_indices.append(edge_index + node_offset)
                 if self.task_level == "node":
                     labels = self._prepare_labels(data.y).to(device)
-                    labels = self._match_label_size(labels, num_nodes)
+                    if self.single_label_classification:
+                        labels = self._match_label_size(labels, num_nodes)
+                    elif labels.dim() > 1 and labels.size(0) == num_nodes:
+                        labels = labels.view(num_nodes, -1)
+                    elif labels.numel() % max(1, num_nodes) == 0:
+                        labels = labels.view(num_nodes, -1)
+                    else:
+                        labels = labels.view(-1)[:num_nodes]
                     node_labels.append(labels)
                     train_mask = getattr(data, "train_mask", None)
                     if train_mask is None:
@@ -347,10 +447,20 @@ class FinetuneGPPT(FinetuneTask):
                     graph_labels = self._prepare_labels(data.y).to(device)
                     num_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
                     if num_graphs > 0:
-                        graph_labels = self._match_label_size(graph_labels, num_graphs)
+                        if self.single_label_classification:
+                            graph_labels = self._match_label_size(graph_labels, num_graphs)
+                        elif graph_labels.dim() == 1:
+                            if graph_labels.numel() == num_graphs:
+                                graph_labels = graph_labels.view(num_graphs, 1)
+                            elif graph_labels.numel() % num_graphs == 0:
+                                graph_labels = graph_labels.view(num_graphs, -1)
+                            else:
+                                graph_labels = graph_labels.view(-1, 1)[:num_graphs]
+                        elif graph_labels.size(0) != num_graphs and graph_labels.numel() % num_graphs == 0:
+                            graph_labels = graph_labels.view(num_graphs, -1)
                         labels = graph_labels[batch]
                     else:
-                        labels = graph_labels.new_zeros((0,), dtype=torch.long)
+                        labels = graph_labels.new_zeros((0,), dtype=graph_labels.dtype)
                     node_labels.append(labels)
                     train_indices.append(torch.arange(num_nodes, device=device, dtype=torch.long) + node_offset)
                 node_offset += num_nodes
@@ -379,27 +489,38 @@ class FinetuneGPPT(FinetuneTask):
         if optimizer is None:
             raise ValueError("GPPT requires an optimizer.")
 
+        self._maybe_print_generalized_notice()
         self._maybe_initialize_prompt(model=model, loader=loader, device=device)
         self._set_encoder_mode(model)
         self.prompt.train()
 
         total_loss = 0.0
-        total_acc = 0.0
+        total_primary = 0.0
         num_batches = 0
         for data in loader:
             optimizer.zero_grad()
             structure_for_update = None
             if self.task_level == "node":
-                outputs = self._node_forward(model=model, data=data, device=device, mask_attr="train_mask")
+                if self.single_label_classification:
+                    outputs = self._node_forward(model=model, data=data, device=device, mask_attr="train_mask")
+                else:
+                    outputs = self._node_forward_generalized(model=model, data=data, device=device, mask_attr="train_mask")
                 if outputs is None:
                     continue
-                loss, acc, _logits, _labels, structure_for_update = outputs
+                loss, primary, _logits, _labels, structure_for_update = outputs
             else:
-                loss, acc, _logits, _labels, structure_for_update = self._graph_forward(
-                    model=model,
-                    data=data,
-                    device=device,
-                )
+                if self.single_label_classification:
+                    loss, primary, _logits, _labels, structure_for_update = self._graph_forward(
+                        model=model,
+                        data=data,
+                        device=device,
+                    )
+                else:
+                    loss, primary, _logits, _labels, structure_for_update = self._graph_forward_generalized(
+                        model=model,
+                        data=data,
+                        device=device,
+                    )
 
             if self.constraint_weight > 0:
                 loss = loss + self.constraint_weight * self._orthogonality_constraint()
@@ -411,12 +532,13 @@ class FinetuneGPPT(FinetuneTask):
                 self.prompt.update_StructureToken_weight(structure_for_update)
 
             total_loss += float(loss.item())
-            total_acc += float(acc)
+            total_primary += float(primary)
             num_batches += 1
 
         if num_batches == 0:
             return 0.0, {}
-        return total_loss / num_batches, {"train_acc": total_acc / num_batches}
+        metric_name = "train_mae" if self.task_type == "regression" else "train_acc"
+        return total_loss / num_batches, {metric_name: total_primary / num_batches}
 
     def evaluate_split(self, model, loader, device, prefix: str, mask_attr: str) -> Dict[str, float]:
         model.eval()
@@ -430,16 +552,26 @@ class FinetuneGPPT(FinetuneTask):
         with torch.no_grad():
             for data in loader:
                 if self.task_level == "node":
-                    outputs = self._node_forward(model=model, data=data, device=device, mask_attr=mask_attr)
+                    if self.single_label_classification:
+                        outputs = self._node_forward(model=model, data=data, device=device, mask_attr=mask_attr)
+                    else:
+                        outputs = self._node_forward_generalized(model=model, data=data, device=device, mask_attr=mask_attr)
                     if outputs is None:
                         continue
-                    loss, _acc, logits, labels, _structure_for_update = outputs
+                    loss, _primary, logits, labels, _structure_for_update = outputs
                 else:
-                    loss, _acc, logits, labels, _structure_for_update = self._graph_forward(
-                        model=model,
-                        data=data,
-                        device=device,
-                    )
+                    if self.single_label_classification:
+                        loss, _primary, logits, labels, _structure_for_update = self._graph_forward(
+                            model=model,
+                            data=data,
+                            device=device,
+                        )
+                    else:
+                        loss, _primary, logits, labels, _structure_for_update = self._graph_forward_generalized(
+                            model=model,
+                            data=data,
+                            device=device,
+                        )
 
                 total_loss += float(loss.item())
                 num_batches += 1

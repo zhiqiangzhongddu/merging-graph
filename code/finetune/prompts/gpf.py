@@ -44,8 +44,3 @@ class GPFPlusPrompt(nn.Module):
         weight = F.softmax(score, dim=1)
         prompt = weight.mm(self.p_list)
         return x + prompt
-
-
-# Aliases aligned with upstream naming.
-SimplePrompt = GPFPrompt
-GPFplusAtt = GPFPlusPrompt

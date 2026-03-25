@@ -5,14 +5,13 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from code.finetune.encoders.prompt_encoder import resolve_edgeprompt_add_self_loops_from_cfg
 from code.finetune.prompts.edgeprompt import EdgePrompt, EdgePromptPlus
 from code.finetune.registry import register
+from code.finetune.task_heads import TaskAwareObjective, build_task_aware_classifier
 from code.finetune.task_base import FinetuneTask
-from code.pretrain.methods.utils import get_batch_vector, pool_nodes
 from code.utils import compute_supervised_metrics
 
 
@@ -25,11 +24,12 @@ class FinetuneEdgePrompt(FinetuneTask):
         ds_cfg = cfg.finetune.dataset
         self.task_level = ds_cfg.task_level
         self.task_level_raw = str(getattr(ds_cfg, "task_level_raw", ds_cfg.task_level) or ds_cfg.task_level).lower()
-        self.num_classes = int(getattr(ds_cfg, "num_classes", 2) or 2)
-        self.task_type = str(getattr(ds_cfg, "task_type", "classification") or "classification").lower()
-
-        if self.task_type != "classification":
-            raise ValueError("EdgePrompt currently supports classification tasks only.")
+        hidden_dim = int(getattr(cfg.model, "hidden_dim", 1) or 1)
+        self.repr_dim = int(getattr(cfg.model, "out_dim", hidden_dim) or hidden_dim)
+        self.objective = TaskAwareObjective(cfg, task_level=self.task_level, repr_dim=self.repr_dim)
+        self.num_classes = int(self.objective.num_classes or 2)
+        self.task_type = self.objective.task_type
+        self.label_dim = self.objective.label_dim
 
         method_cfg = getattr(cfg.finetune, "edgeprompt", None)
         self.method_cfg = method_cfg
@@ -81,7 +81,12 @@ class FinetuneEdgePrompt(FinetuneTask):
                 add_self_loops=add_self_loops,
             )
         self.prompt_type = "EdgePromptplus" if use_plus else "EdgePrompt"
-        self.classifier = nn.Linear(cfg.model.out_dim, self.num_classes)
+        self.classifier = build_task_aware_classifier(
+            input_dim=self.repr_dim,
+            task_type=self.task_type,
+            label_dim=self.label_dim,
+            num_classes=self.objective.num_classes,
+        )
 
     def parameters_to_optimize(self):
         return list(self.prompt.parameters()) + list(self.classifier.parameters())
@@ -123,43 +128,19 @@ class FinetuneEdgePrompt(FinetuneTask):
     ) -> Tuple[torch.Tensor, float]:
         data = data.to(device)
         node_repr, graph_repr = model(data, prompt=self.prompt, prompt_type=self.prompt_type)
-
-        if self.task_level == "node":
-            logits = self.classifier(node_repr)
-            mask = getattr(data, mask_attr, None)
-            if mask is None:
-                mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
-            labels = data.y[mask].long()
-            loss = F.cross_entropy(logits[mask], labels)
-            pred = logits.argmax(dim=-1)
-            acc = (pred[mask] == labels).float().mean().item()
-            if return_logits:
-                return loss, acc, logits[mask], labels
-            return loss, acc
-
-        batch = get_batch_vector(data)
+        pooling_mode = "mean" if self.force_mean_pooling else None
         if self.force_mean_pooling:
-            graph_repr = pool_nodes(
-                node_repr,
-                batch,
-                mode="mean",
-                data=data,
-            )
-        elif graph_repr is None:
-            graph_repr = pool_nodes(
-                node_repr,
-                batch,
-                mode=self.cfg.model.graph_pooling,
-                data=data,
-            )
-        logits = self.classifier(graph_repr)
-        labels = data.y.view(-1).long()
-        loss = F.cross_entropy(logits, labels)
-        pred = logits.argmax(dim=-1)
-        acc = (pred == labels).float().mean().item()
-        if return_logits:
-            return loss, acc, logits, labels
-        return loss, acc
+            graph_repr = None
+        return self.objective.forward_with_model_outputs(
+            classifier=self.classifier,
+            node_repr=node_repr,
+            graph_repr=graph_repr,
+            data=data,
+            device=device,
+            mask_attr=mask_attr,
+            graph_pooling_mode=pooling_mode,
+            return_outputs=return_logits,
+        )
 
     def train_epoch(self, model, loader, device, optimizers=None):
         self._set_encoder_train_mode(model)
@@ -183,7 +164,8 @@ class FinetuneEdgePrompt(FinetuneTask):
 
         if num_batches == 0:
             return 0.0, {}
-        return total_loss / num_batches, {"train_acc": total_acc / num_batches}
+        metric_name = "train_mae" if self.task_type == "regression" else "train_acc"
+        return total_loss / num_batches, {metric_name: total_acc / num_batches}
 
     def evaluate_split(self, model, loader, device, prefix: str, mask_attr: str) -> Dict[str, float]:
         model.eval()

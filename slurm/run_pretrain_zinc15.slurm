@@ -41,7 +41,7 @@ if srun ${SRUN_EXTRA_ARGS} --ntasks=4 --kill-on-bad-exit=1 bash <<'SRUN_SCRIPT'
 set -euo pipefail
 
 METHODS=(edge_pred edge_pred context_pred context_pred)
-BATCH_SIZES=(256 512 256 512)
+BATCH_SIZES=(1024 2048 1024 2048)
 
 TASK_ID="${SLURM_PROCID:-0}"
 TOTAL_TASKS="${SLURM_NTASKS:-4}"

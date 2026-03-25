@@ -183,6 +183,7 @@ class GPPTPrompt(nn.Module):
         in_channels: int,
         center_num: int,
         num_classes: int,
+        output_dim: int | None = None,
         structure_mode: str = "neighbor",
         task_mode: str = "concat",
         add_self_loops_in_conv: bool = True,
@@ -192,11 +193,13 @@ class GPPTPrompt(nn.Module):
         use_sklearn_kmeans: bool = True,
         kmeans_random_state: int = 0,
         kmeans_n_init: int = 10,
+        use_prototype_init: bool = True,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
         self.center_num = max(1, int(center_num))
         self.num_classes = max(2, int(num_classes))
+        self.output_dim = max(1, int(output_dim or num_classes))
         self.structure_mode = str(structure_mode or "neighbor").lower()
         self.task_mode = str(task_mode or "concat").lower()
         self.kmeans_max_iter = max(1, int(kmeans_max_iter))
@@ -205,6 +208,7 @@ class GPPTPrompt(nn.Module):
         self.use_sklearn_kmeans = bool(use_sklearn_kmeans)
         self.kmeans_random_state = int(kmeans_random_state)
         self.kmeans_n_init = max(1, int(kmeans_n_init))
+        self.use_prototype_init = bool(use_prototype_init)
 
         valid_modes = {"node", "neighbor", "concat"}
         if self.structure_mode not in valid_modes:
@@ -216,7 +220,7 @@ class GPPTPrompt(nn.Module):
         structure_dim = self.in_channels * (2 if self.structure_mode == "concat" else 1)
         task_dim = self.in_channels * (2 if self.task_mode == "concat" else 1)
         self.StructureToken = nn.Linear(structure_dim, self.center_num, bias=False)
-        self.TaskToken = nn.ModuleList([nn.Linear(task_dim, self.num_classes, bias=False) for _ in range(self.center_num)])
+        self.TaskToken = nn.ModuleList([nn.Linear(task_dim, self.output_dim, bias=False) for _ in range(self.center_num)])
         self._mid_h: Optional[Tensor] = None
         self.reset_parameters()
 
@@ -291,9 +295,10 @@ class GPPTPrompt(nn.Module):
             )
             self.StructureToken.weight.data.copy_(centers)
 
-            prototypes = _class_prototypes(selected_task, selected_labels, self.num_classes)
-            for head in self.TaskToken:
-                head.weight.data.copy_(prototypes)
+            if self.use_prototype_init:
+                prototypes = _class_prototypes(selected_task, selected_labels, self.num_classes)
+                for head in self.TaskToken:
+                    head.weight.data.copy_(prototypes)
 
             self._mid_h = structure_feat.detach()
 
@@ -321,7 +326,7 @@ class GPPTPrompt(nn.Module):
         self._mid_h = structure_feat.detach()
         assignment = self.StructureToken(structure_feat).argmax(dim=1)
 
-        out = task_feat.new_zeros((task_feat.size(0), self.num_classes))
+        out = task_feat.new_zeros((task_feat.size(0), self.output_dim))
         for center_id, head in enumerate(self.TaskToken):
             mask = assignment == center_id
             if bool(mask.any().item()):

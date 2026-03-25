@@ -582,7 +582,7 @@ def split_graph_dataset(
                 return_split_meta=return_split_meta,
             )
         else:
-            raise ValueError("Integer-first splits are not supported for unlabeled or single-target regression graph datasets.")
+            raise ValueError("Integer-first splits are not supported for unlabeled graph datasets.")
     else:
         result = _get_or_create_split_indices(
             dataset_name=split_dataset_name,

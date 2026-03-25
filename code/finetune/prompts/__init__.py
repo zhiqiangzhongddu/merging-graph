@@ -1,6 +1,6 @@
 """Prompt modules for finetuning."""
 
-from .gpf import GPFPlusPrompt, GPFPrompt, GPFplusAtt, SimplePrompt
+from .gpf import GPFPlusPrompt, GPFPrompt
 from .edgeprompt import EdgePrompt, EdgePromptPlus
 from .gppt import GPPTPrompt
 from .graphprompt import GraphPrompt, GraphPromptPlus, GraphPromptTuningLoss, compute_class_centers
@@ -8,8 +8,6 @@ from .graphprompt import GraphPrompt, GraphPromptPlus, GraphPromptTuningLoss, co
 __all__ = [
     "GPFPrompt",
     "GPFPlusPrompt",
-    "SimplePrompt",
-    "GPFplusAtt",
     "EdgePrompt",
     "EdgePromptPlus",
     "GPPTPrompt",

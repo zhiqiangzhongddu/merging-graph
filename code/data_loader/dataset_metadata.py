@@ -168,8 +168,8 @@ def resolve_count_split_strategy(dataset, task_level: str) -> str:
 
     Returns:
       - "balanced": single-label classification few-shot
-      - "random": multi-target labels -> random train-count split
-      - "unsupported": unlabeled or single-target regression
+      - "random": multi-target labels or regression -> random train-count split
+      - "unsupported": unlabeled tasks
     """
     level = str(task_level).lower()
     if level == "edge":
@@ -183,7 +183,7 @@ def resolve_count_split_strategy(dataset, task_level: str) -> str:
     if _label_target_dim(labels) > 1:
         return "random"
     if is_regression_dataset(dataset, level):
-        return "unsupported"
+        return "random"
     return "balanced"
 
 

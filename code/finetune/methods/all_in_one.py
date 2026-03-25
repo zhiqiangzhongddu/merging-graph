@@ -10,6 +10,7 @@ from torch import nn
 
 from code.finetune.prompts.all_in_one import HeavyPrompt
 from code.finetune.registry import register
+from code.finetune.task_heads import TaskAwareObjective, build_task_aware_classifier
 from code.finetune.task_base import FinetuneTask
 from code.pretrain.methods.utils import get_batch_vector, pool_nodes
 from code.utils import compute_supervised_metrics
@@ -74,10 +75,6 @@ class FinetuneAllInOne(FinetuneTask):
 
         if self.task_level == "node":
             raise ValueError("All-in-One requires graph-level batches (use induced=True for node datasets).")
-        if self.task_type != "classification":
-            raise ValueError("All-in-One currently supports classification only.")
-        if self.label_dim > 1:
-            raise ValueError("All-in-One currently supports single-label classification only.")
 
         method_cfg = getattr(cfg.finetune, "all_in_one", None)
         token_num = int(getattr(method_cfg, "token_num", 10)) if method_cfg else 10
@@ -143,6 +140,8 @@ class FinetuneAllInOne(FinetuneTask):
         hidden_dim = int(getattr(cfg.model, "hidden_dim", 1) or 1)
         out_dim = int(getattr(cfg.model, "out_dim", hidden_dim) or hidden_dim)
         self.repr_dim = out_dim
+        self.objective = TaskAwareObjective(cfg, task_level=self.task_level, repr_dim=self.repr_dim)
+        self.single_label_classification = self.objective.is_single_label_classification
 
         self.prompt = HeavyPrompt(
             token_dim=int(cfg.model.in_dim),
@@ -151,14 +150,20 @@ class FinetuneAllInOne(FinetuneTask):
             inner_prune=inner_prune,
             bidirectional_cross_edges=self.bidirectional_cross_edges,
         )
+        if self.answer_with_softmax and not self.single_label_classification:
+            raise ValueError("All-in-One answer_with_softmax is only supported for single-label classification.")
         if self.answer_with_softmax:
             self.answering = nn.Sequential(
-                nn.Linear(self.repr_dim, max(2, num_classes)),
+                nn.Linear(self.repr_dim, self.objective.output_dim),
                 nn.Softmax(dim=1),
             )
         else:
-            self.answering = nn.Linear(self.repr_dim, max(2, num_classes))
-        self.criterion = nn.CrossEntropyLoss()
+            self.answering = build_task_aware_classifier(
+                input_dim=self.repr_dim,
+                task_type=self.task_type,
+                label_dim=self.label_dim,
+                num_classes=num_classes,
+            )
         self._encoder_frozen_notice_printed = False
         self._answer_cache_notice_printed = False
 
@@ -174,6 +179,10 @@ class FinetuneAllInOne(FinetuneTask):
 
     @staticmethod
     def _prepare_labels(labels: torch.Tensor) -> torch.Tensor:
+        return torch.as_tensor(labels)
+
+    @staticmethod
+    def _prepare_single_label_labels(labels: torch.Tensor) -> torch.Tensor:
         labels = torch.as_tensor(labels)
         if labels.dim() > 1:
             labels = labels.view(labels.size(0), -1)[:, 0]
@@ -272,6 +281,25 @@ class FinetuneAllInOne(FinetuneTask):
         labels = self._prepare_labels(prompted.y).to(device)
         return graph_repr, labels
 
+    def _answer_forward(self, graph_repr, labels, return_outputs: bool = False):
+        graph_repr = self._align_last_dim(graph_repr, self.repr_dim)
+        if self.answer_with_softmax:
+            logits = self.answering(graph_repr)
+            class_labels = self._prepare_single_label_labels(labels).to(graph_repr.device)
+            loss = F.cross_entropy(logits, class_labels)
+            pred = logits.argmax(dim=-1)
+            acc = float((pred == class_labels).float().mean().item())
+            if return_outputs:
+                return loss, acc, torch.log(logits.clamp_min(1e-12)), class_labels
+            return loss, acc
+        return self.objective.forward_with_classifier(
+            classifier=self.answering,
+            representations=graph_repr,
+            labels=labels,
+            input_dim=self.repr_dim,
+            return_outputs=return_outputs,
+        )
+
     def _run_epoch(self, model, loader, device, optimizer, train_prompt: bool):
         model.eval()
         if train_prompt:
@@ -294,8 +322,7 @@ class FinetuneAllInOne(FinetuneTask):
             else:
                 with torch.no_grad():
                     graph_repr, labels = self._graph_embeddings(model, data, device)
-            logits = self.answering(graph_repr)
-            loss = F.cross_entropy(logits, labels)
+            loss, _primary = self._answer_forward(graph_repr, labels, return_outputs=False)
             loss.backward()
             optimizer.step()
             total_loss += float(loss.item())
@@ -336,8 +363,7 @@ class FinetuneAllInOne(FinetuneTask):
         for idx in order:
             graph_repr, labels = cache[idx]
             optimizer.zero_grad(set_to_none=True)
-            logits = self.answering(graph_repr)
-            loss = F.cross_entropy(logits, labels)
+            loss, _primary = self._answer_forward(graph_repr, labels, return_outputs=False)
             loss.backward()
             optimizer.step()
             total_loss += float(loss.item())
@@ -387,8 +413,11 @@ class FinetuneAllInOne(FinetuneTask):
         with torch.no_grad():
             for data in loader:
                 graph_repr, labels = self._graph_embeddings(model, data, device)
-                logits = self.answering(graph_repr)
-                loss = self.criterion(logits, labels)
+                loss, _primary, logits, labels = self._answer_forward(
+                    graph_repr,
+                    labels,
+                    return_outputs=True,
+                )
                 total_loss += float(loss.item())
                 num_batches += 1
                 all_logits.append(logits.detach().cpu())
@@ -403,14 +432,8 @@ class FinetuneAllInOne(FinetuneTask):
         if all_logits and all_labels:
             logits = torch.cat(all_logits, dim=0)
             labels = torch.cat(all_labels, dim=0)
-            metric_logits = logits
-            if self.answer_with_softmax:
-                # compute_supervised_metrics applies softmax for multiclass inputs.
-                # Convert probabilities back to logit-space so metrics use exactly
-                # the model probabilities instead of a second softmax.
-                metric_logits = torch.log(logits.clamp_min(1e-12))
             for key, value in compute_supervised_metrics(
-                logits=metric_logits,
+                logits=logits,
                 labels=labels,
                 task_type=self.task_type,
             ).items():
