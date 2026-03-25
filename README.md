@@ -100,16 +100,19 @@ Run a single pre-training job from the project root:
 ```bash
 # attr_masking / context_pred / dgi / edge_pred / graphcl / infograph 
 python run_pretrain.py \
-  model.name gcn \
-  pretrain.dataset.name cora \
-  pretrain.dataset.task_level node \
-  pretrain.dataset.induced True \
+  model.name gin \
+  pretrain.dataset.name zinc15 \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.induced False \
   pretrain.method edge_pred \
+  pretrain.epochs 100 \
+  pretrain.early_stopping 100 \
+  pretrain.batch_size 256 \
   device 0
 
 # supervised
 python run_pretrain.py \
-  model.name gcn \
+  model.name gin \
   pretrain.dataset.name cora \
   pretrain.dataset.task_level node \
   pretrain.dataset.induced True \
@@ -140,17 +143,22 @@ Supported 9 fine-tuning methods:
 ```bash
 # supervised
 python run_finetune.py \
-  model.name gcn \
-  pretrain.dataset.name cora \
-  pretrain.dataset.task_level node \
-  pretrain.dataset.induced True \
+  model.name gin \
+  pretrain.dataset.name zinc15 \
+  pretrain.dataset.task_level graph \
+  pretrain.dataset.induced False \
   pretrain.method edge_pred \
-  finetune.dataset.name cora \
-  finetune.dataset.task_level node \
-  finetune.dataset.induced True \
+  pretrain.epochs 100 \
+  pretrain.early_stopping 100 \
+  pretrain.batch_size 256 \
+  finetune.freeze_pretrained True \
+  finetune.monitor_metric val_auc \
+  finetune.dataset.name clintox \
+  finetune.dataset.task_level graph \
+  finetune.dataset.induced False \
   finetune.dataset.task_type classification \
   finetune.method supervised \
-  finetune.dataset.fixed_split "(100,0.0,1.0)" \
+  finetune.dataset.fixed_split "(0.8,0.1,0.1)" \
   device 0
 
 # all_in_one
