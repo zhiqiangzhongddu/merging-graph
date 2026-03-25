@@ -1,23 +1,22 @@
 #!/bin/bash -l
-#SBATCH --job-name "train_tests_by_batch"
+#SBATCH --job-name "run"
 #SBATCH --time=2-00:00:00       # time (D-HH:MM:SS)
 #SBATCH --account=p201211       # project account
-#SBATCH --nodes=1               # one node per batch of train tests
+#SBATCH --nodes=1               # one node per batch of finetune runs
 #SBATCH --partition gpu         # partition
-#SBATCH --gpus-per-node=4       # GPUs per node
-#SBATCH --gpus-per-task=1       # one GPU per train task
-#SBATCH --ntasks-per-node=4     # one task per GPU
-#SBATCH --cpus-per-task=8       # cores per task
-#SBATCH --array=0-1             # 8 commands => 2 array elements at 4 commands per job
+#SBATCH --gpus-per-node=4       # 4 GPUs per job
+#SBATCH --gpus-per-task=1       # one GPU per command
+#SBATCH --ntasks-per-node=4     # launch 4 commands in parallel
+#SBATCH --cpus-per-task=8       # cores per task (adjust if needed)
+#SBATCH --array=0-3             # 16 commands => 4 array elements at 4 commands per job
 #SBATCH --qos default           # SLURM qos
 #SBATCH --output=slurm/output/%x-%A_%a.out
 #SBATCH --error=slurm/output/%x-%A_%a.err
 
 set -euo pipefail
 
-# Derived from test/train.sh.
-# If test/train.sh changes, update slurm/run_all_train_tests.commands.txt
-# and the array range in this file together.
+# Generated from slurm/run.commands.txt.
+# If the manifest changes, update the array range in this file together.
 
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 ROOT_DIR="$(cd "${SUBMIT_DIR}" && pwd)"
@@ -38,9 +37,9 @@ export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
 mkdir -p "${ROOT_DIR}/slurm/output"
 cd "${ROOT_DIR}"
 
-MANIFEST_FILE="${ROOT_DIR}/slurm/run_all_train_tests.commands.txt"
+MANIFEST_FILE="${ROOT_DIR}/slurm/run.commands.txt"
 if [ ! -f "${MANIFEST_FILE}" ]; then
-  echo "[train-tests] ERROR: Manifest file not found: ${MANIFEST_FILE}" >&2
+  echo "[finetune] ERROR: Manifest file not found: ${MANIFEST_FILE}" >&2
   exit 2
 fi
 
@@ -91,6 +90,6 @@ then
   :
 else
   rc=$?
-  echo "[train-tests] ERROR: srun failed with rc=${rc} for array_id=${SLURM_ARRAY_TASK_ID:-0}" >&2
+  echo "[finetune] ERROR: srun failed with rc=${rc} for array_id=${SLURM_ARRAY_TASK_ID:-0}" >&2
   exit "${rc}"
 fi

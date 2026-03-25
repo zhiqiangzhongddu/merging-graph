@@ -29,14 +29,14 @@ if [ "$(basename "${ROOT_DIR}")" = "slurm" ]; then
 fi
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
 
-# Activate conda environment (defaults to agae). Override CONDA_BASE if needed.
+# Activate conda environment (defaults to merging-graph). Override CONDA_BASE if needed.
 CONDA_BASE="${CONDA_BASE:-/project/home/p201211/conda_base_path/miniconda3}"
 if [ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]; then
   . "${CONDA_BASE}/etc/profile.d/conda.sh"
 elif command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook)"
 fi
-conda activate "${CONDA_ENV:-agae}"
+conda activate "${CONDA_ENV:-merging-graph}"
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
 
 mkdir -p "${ROOT_DIR}/slurm/output"

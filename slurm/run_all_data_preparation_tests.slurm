@@ -32,7 +32,7 @@ if [ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]; then
 elif command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook)"
 fi
-conda activate "${CONDA_ENV:-agae}"
+conda activate "${CONDA_ENV:-merging-graph}"
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
 
 mkdir -p "${ROOT_DIR}/slurm/output"
