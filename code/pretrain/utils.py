@@ -1,6 +1,9 @@
 from typing import Any, Dict, List
+from datetime import datetime
 
 from code.pretrain.pretrainer import PretrainRunner
+from code.utils.run_helpers import aggregate_run_metrics, checkpoint_path_for_runner, collect_run_metrics
+from code.utils.save_results import append_workflow_result
 
 
 def _parse_bool(value: str) -> bool:
@@ -116,11 +119,30 @@ def run_pretrain_tasks(cfg) -> int:
 
     results: List[bool] = []
     for task in tasks:
+        started_at = datetime.now().astimezone()
         run_cfg = _build_task_cfg(cfg, task)
         seed_value = task.get("seed", getattr(run_cfg, "seed", None))
         try:
             runner = PretrainRunner(run_cfg)
             runner.fit()
+            ended_at = datetime.now().astimezone()
+            skipped = bool(getattr(runner, "_skip_due_to_existing_checkpoint", False))
+            if not skipped or bool(getattr(run_cfg.save_results, "save_skipped", False)):
+                summary = aggregate_run_metrics([collect_run_metrics(runner, log_prefix="[Pretrain][Summary]")])
+                metric_summary = summary["metric_stats"]
+                best_epochs = summary["epoch_values"].get("best_epoch")
+                seeds = [int(run_cfg.seed)]
+
+                append_workflow_result(
+                    cfg=run_cfg,
+                    workflow="pretrain",
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    checkpoint_save_paths=[checkpoint_path_for_runner(runner)],
+                    seeds=seeds,
+                    best_epochs=best_epochs,
+                    metric_summary=metric_summary,
+                )
             results.append(True)
         except Exception as exc:
             print(

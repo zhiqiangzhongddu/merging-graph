@@ -6,6 +6,7 @@ import warnings
 from typing import Iterable
 
 from code.config import cfg as base_cfg, update_cfg
+from code.utils.save_results import extract_explicit_cfg_keys, set_explicit_cfg_keys
 
 from .runtime import run_finetune as _run_finetune
 from .utils import extract_few_shot
@@ -20,9 +21,12 @@ def build_finetune_cfg(argv: Iterable[str]):
     raw_argv = list(argv)
     forwarded_argv, few_shot_split = extract_few_shot(raw_argv)
     cfg = update_cfg(base_cfg, " ".join(forwarded_argv))
+    explicit_keys = extract_explicit_cfg_keys(forwarded_argv, flag_arity={"--config": 1})
 
     if few_shot_split is not None:
         cfg.finetune.dataset.fixed_split = few_shot_split
+        explicit_keys.append("finetune.dataset.fixed_split")
+    set_explicit_cfg_keys(cfg, explicit_keys)
     return cfg
 
 

@@ -32,6 +32,7 @@ finetuned_models/*
 # ignore outputs but keep .gitkeep files for directory structure
 outputs/*
 !outputs/.gitkeep
+!outputs/results/
 
 # ignore slurm outputs but keep .gitkeep files for directory structure
 slurm/output/*

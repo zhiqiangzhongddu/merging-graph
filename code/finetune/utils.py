@@ -1,12 +1,14 @@
 import glob
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from code.utils import build_run_name_from_cfg
+from code.utils.run_helpers import aggregate_run_metrics, checkpoint_path_for_runner, collect_run_metrics
+from code.utils.save_results import append_workflow_result
 from code.finetune.finetuner import FinetuneRunner
-
 
 def extract_few_shot(argv: List[str]) -> Tuple[List[str], Optional[Tuple[int, float, float]]]:
     """Pull a `--fewshot shots val_ratio test_ratio` override out of argv."""
@@ -211,6 +213,7 @@ def run_finetune_tasks(cfg) -> int:
                 f"[Finetune] Running {ckpt.get('run_name')} -> "
                 f"{dataset_name} (task level={task_level}, induced={induced})"
             )
+            started_at = datetime.now().astimezone()
             run_cfg = _build_task_cfg(cfg, dataset_name, task_level, induced)
             try:
                 runner = FinetuneRunner(
@@ -219,6 +222,24 @@ def run_finetune_tasks(cfg) -> int:
                     pretrained_run_name=ckpt.get("run_name"),
                 )
                 runner.fit()
+                ended_at = datetime.now().astimezone()
+                skipped = bool(getattr(runner, "_skip_due_to_existing_checkpoint", False))
+                if not skipped or bool(getattr(run_cfg.save_results, "save_skipped", False)):
+                    summary = aggregate_run_metrics([collect_run_metrics(runner, log_prefix="[Finetune][Summary]")])
+                    metric_summary = summary["metric_stats"]
+                    best_epochs = summary["epoch_values"].get("best_epoch")
+                    seeds = [int(run_cfg.seed)]
+
+                    append_workflow_result(
+                        cfg=run_cfg,
+                        workflow="finetune",
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        checkpoint_save_paths=[checkpoint_path_for_runner(runner)],
+                        seeds=seeds,
+                        best_epochs=best_epochs,
+                        metric_summary=metric_summary,
+                    )
                 results.append(True)
             except Exception as exc:
                 print(f"[Finetune] Failed {ckpt.get('run_name')} -> {dataset_name}: {exc}")

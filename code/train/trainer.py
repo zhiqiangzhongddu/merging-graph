@@ -14,29 +14,12 @@ from code.pretrain.base import PretrainTask
 from code.pretrain.checkpoint import cfg_to_dict, save_checkpoint
 from code.pretrain.methods.utils import get_batch_vector, pool_nodes
 from code.train.monitoring import resolve_train_monitor_spec
+from code.train.utils import _shared_induced_root, _shared_split_root, _split_dataset_name
 from code.utils.metrics import compute_supervised_metrics
 from code.utils.monitoring import resolve_monitor_value
 from code.utils.naming import format_split_for_name
 from code.utils.paths import ensure_dir
 from code.utils.random import set_seed
-
-
-def _shared_split_root(cfg) -> str:
-    ds_cfg = getattr(getattr(cfg, "data_preparation", None), "dataset", None)
-    return getattr(ds_cfg, "split_root", "data/splits")
-
-
-def _shared_induced_root(cfg, fallback: str = "") -> str:
-    ds_cfg = getattr(getattr(cfg, "data_preparation", None), "dataset", None)
-    root = getattr(ds_cfg, "induced_root", "")
-    return root or fallback
-
-
-def _split_dataset_name(base_name: str, task_level: str, seed: int) -> str:
-    name = str(base_name)
-    if any(tag in name for tag in ("_node_seed", "_graph_seed", "_edge_seed")):
-        return name
-    return f"{name}_{task_level}_seed{int(seed)}"
 
 
 class TrainSupervised(PretrainTask):

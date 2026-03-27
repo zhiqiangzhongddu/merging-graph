@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from code.config import cfg as base_cfg, update_cfg
+from code.utils.save_results import extract_explicit_cfg_keys, set_explicit_cfg_keys
 
 from .runtime import run_pretrain as _run_pretrain
 
@@ -20,6 +21,7 @@ def build_pretrain_cfg(argv: Iterable[str]):
         )
 
     cfg = update_cfg(base_cfg, " ".join(raw_argv))
+    set_explicit_cfg_keys(cfg, extract_explicit_cfg_keys(raw_argv, flag_arity={"--config": 1}))
 
     if not getattr(cfg.pretrain, "run_all", False):
         explicit_name = any(
